@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: kent-invest-crypto-tape-terminal
+    env: node
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    plan: free
