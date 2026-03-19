@@ -29,4 +29,7 @@ export const quantApi = {
   getLiveWorkspace: () => request('/api/quant/live-metrics'),
   startLivePaper: (payload) => request('/api/quant/live/start', { method: 'POST', body: JSON.stringify(payload) }),
   stopLivePaper: () => request('/api/quant/live/stop', { method: 'POST', body: '{}' }),
+  getBacktestSnapshot: () => request('/api/quant/backtest/snapshot'),
+  startBacktest: (payload) => request('/api/quant/backtest/start', { method: 'POST', body: JSON.stringify(payload) }),
+  stopBacktest: () => request('/api/quant/backtest/stop', { method: 'POST', body: '{}' })
 };
