@@ -66,44 +66,250 @@ export class HistoricalBacktestDataService {
     this.smallGapThresholdMs = smallGapThresholdMs;
   }
 
-  async loadDay({ symbol, dayStartMs, dayEndMs, progressCallback, shouldStop }) {
+  planCoverageRange({ symbol, startDate, endDate, includeCurrentDay = false, shouldStop }) {
     const normalizedSymbol = normalizeSymbol(symbol);
-    const targetEndMs = Math.min(dayEndMs, this.now());
+    const startDay = normalizeUtcDayInput(startDate);
+    const endDay = normalizeUtcDayInput(endDate || startDate);
+    const nowMs = this.now();
+    const currentUtcDayStartMs = getUtcDayStartMs(nowMs);
+    const requestedCurrentUtcDay = startDay.getTime() <= currentUtcDayStartMs && endDay.getTime() >= currentUtcDayStartMs;
 
-    this.#emitHydrationProgress(progressCallback, {
-      stage: 'Checking historical trade coverage',
-      hydration: {
-        source: null,
-        status: 'checking',
-        rowsIngested: 0,
-        pagesIngested: 0,
-        checkpointTimeMs: null,
-        lastAggTradeId: null,
-        retry: null,
-        percent: 0
+    if (requestedCurrentUtcDay && !includeCurrentDay) {
+      throw new HistoricalCoverageError(
+        'Requested range includes the current UTC day. Enable includeCurrentDay to use the slower tail-hydration path, or choose an earlier end date.',
+        {
+          symbol: normalizedSymbol,
+          startDate: startDay.toISOString().slice(0, 10),
+          endDate: endDay.toISOString().slice(0, 10),
+          currentUtcDay: new Date(currentUtcDayStartMs).toISOString().slice(0, 10),
+          reason: 'current_day_requires_explicit_opt_in'
+        }
+      );
+    }
+
+    const days = [];
+    for (const day of iterateUtcDays(startDay, endDay)) {
+      shouldStop?.();
+      const targetEndMs = day.dayStartMs === currentUtcDayStartMs
+        ? Math.min(day.dayEndMs, nowMs)
+        : day.dayEndMs;
+      const persistedCoverage = this.getHistoricalCoverage?.(normalizedSymbol, day.dayStartMs) || null;
+      const coverage = this.#reconcileCoverageCheckpoint({
+        symbol: normalizedSymbol,
+        dayStartMs: day.dayStartMs,
+        dayEndMs: day.dayEndMs,
+        targetEndMs,
+        coverage: persistedCoverage
+      });
+      const gapMs = Math.max(0, targetEndMs - Number(coverage.coverage_end_ms || (day.dayStartMs - 1)));
+      const isCurrentUtcDay = day.dayStartMs === currentUtcDayStartMs;
+      const completedUtcDay = !isCurrentUtcDay && targetEndMs >= day.dayEndMs;
+      const ready = isCoverageSufficient(coverage, targetEndMs);
+      let classification = 'already-covered-local';
+      if (!ready) {
+        if (isCurrentUtcDay) {
+          classification = 'current-day-tail';
+        } else if (gapMs <= this.smallGapThresholdMs) {
+          classification = 'small-gap-fill';
+        } else {
+          classification = 'completed-day-bulk';
+        }
       }
+
+      days.push({
+        ...day,
+        symbol: normalizedSymbol,
+        targetEndMs,
+        coverage,
+        gapMs,
+        ready,
+        needsHydration: !ready,
+        classification,
+        includeCurrentDay: Boolean(includeCurrentDay),
+        requestedCurrentUtcDay,
+        isCurrentUtcDay,
+        completedUtcDay
+      });
+    }
+
+    const readyDays = days.filter((day) => day.ready).length;
+    const hydratableDays = days.filter((day) => day.needsHydration).length;
+
+    return {
+      symbol: normalizedSymbol,
+      startDate: startDay.toISOString().slice(0, 10),
+      endDate: endDay.toISOString().slice(0, 10),
+      totalDays: days.length,
+      readyDays,
+      hydratableDays,
+      waitingOnCoverage: hydratableDays > 0,
+      includeCurrentDay: Boolean(includeCurrentDay),
+      requestedCurrentUtcDay,
+      currentUtcDay: new Date(currentUtcDayStartMs).toISOString().slice(0, 10),
+      days
+    };
+  }
+
+  async prepareCoverage({ symbol, startDate, endDate, includeCurrentDay = false, progressCallback, shouldStop }) {
+    this.#emitCoverageProgress(progressCallback, {
+      phase: 'planning',
+      stage: 'Preparing historical coverage',
+      progressPct: 1,
+      coverage: {
+        totalDays: 0,
+        readyDays: 0,
+        hydratableDays: 0,
+        waitingOnCoverage: true,
+        hydratingDay: null,
+        includeCurrentDay: Boolean(includeCurrentDay),
+        requestedCurrentUtcDay: false,
+        currentUtcDaySlowPath: false,
+        classifications: []
+      },
+      hydration: null,
+      currentDate: startDate || null,
+      currentDay: 1,
+      totalDays: null
     });
 
-    const coverage = await this.#ensureDayCoverage({
+    const plan = this.planCoverageRange({ symbol, startDate, endDate, includeCurrentDay, shouldStop });
+    const classificationCounts = summarizeCoverageClassifications(plan.days);
+
+    this.#emitCoverageProgress(progressCallback, {
+      phase: 'planning',
+      stage: 'Coverage plan ready',
+      progressPct: plan.waitingOnCoverage ? 5 : 20,
+      coverage: {
+        totalDays: plan.totalDays,
+        readyDays: plan.readyDays,
+        hydratableDays: plan.hydratableDays,
+        waitingOnCoverage: plan.waitingOnCoverage,
+        hydratingDay: null,
+        includeCurrentDay: plan.includeCurrentDay,
+        requestedCurrentUtcDay: plan.requestedCurrentUtcDay,
+        currentUtcDaySlowPath: plan.requestedCurrentUtcDay && plan.includeCurrentDay,
+        classifications: classificationCounts
+      },
+      hydration: null,
+      currentDate: plan.days[0]?.isoDate || null,
+      currentDay: plan.days[0] ? 1 : null,
+      totalDays: plan.totalDays
+    });
+
+    let hydratedDays = 0;
+    for (const day of plan.days) {
+      shouldStop?.();
+      if (!day.needsHydration) continue;
+      hydratedDays += 1;
+      const progressBase = plan.totalDays ? (hydratedDays / plan.totalDays) * 20 : 20;
+      await this.#ensureDayCoverage({
+        symbol: plan.symbol,
+        dayStartMs: day.dayStartMs,
+        dayEndMs: day.dayEndMs,
+        targetEndMs: day.targetEndMs,
+        progressCallback: (payload = {}) => {
+          this.#emitCoverageProgress(progressCallback, {
+            phase: 'hydrating',
+            stage: payload.stage || `Hydrating ${day.isoDate}`,
+            progressPct: 20 + progressBase + ((Number(payload.hydration?.percent || 0) / 100) * 30 / Math.max(plan.totalDays, 1)),
+            coverage: {
+              totalDays: plan.totalDays,
+              readyDays: plan.readyDays + hydratedDays - 1,
+              hydratableDays: plan.hydratableDays,
+              waitingOnCoverage: true,
+              hydratingDay: day.isoDate,
+              includeCurrentDay: plan.includeCurrentDay,
+              requestedCurrentUtcDay: plan.requestedCurrentUtcDay,
+              currentUtcDaySlowPath: plan.requestedCurrentUtcDay && plan.includeCurrentDay,
+              classifications: classificationCounts
+            },
+            hydration: payload.hydration || null,
+            currentDate: day.isoDate,
+            currentDay: day.dayIndex + 1,
+            totalDays: plan.totalDays
+          });
+        },
+        shouldStop,
+        coveragePlanEntry: day
+      });
+      day.coverage = this.getHistoricalCoverage?.(plan.symbol, day.dayStartMs) || day.coverage;
+      day.ready = true;
+      day.needsHydration = false;
+    }
+
+    plan.readyDays = plan.days.filter((day) => day.ready).length;
+    plan.hydratableDays = plan.days.filter((day) => day.needsHydration).length;
+    plan.waitingOnCoverage = false;
+
+    this.#emitCoverageProgress(progressCallback, {
+      phase: 'hydrating',
+      stage: 'Historical coverage ready for replay',
+      progressPct: 50,
+      coverage: {
+        totalDays: plan.totalDays,
+        readyDays: plan.readyDays,
+        hydratableDays: plan.hydratableDays,
+        waitingOnCoverage: false,
+        hydratingDay: null,
+        includeCurrentDay: plan.includeCurrentDay,
+        requestedCurrentUtcDay: plan.requestedCurrentUtcDay,
+        currentUtcDaySlowPath: plan.requestedCurrentUtcDay && plan.includeCurrentDay,
+        classifications: classificationCounts
+      },
+      hydration: null,
+      currentDate: plan.days[0]?.isoDate || null,
+      currentDay: plan.days[0] ? 1 : null,
+      totalDays: plan.totalDays
+    });
+
+    return plan;
+  }
+
+  async loadPreparedDay({ symbol, dayStartMs, dayEndMs, targetEndMs = null, progressCallback, shouldStop, coveragePlanEntry = null }) {
+    const normalizedSymbol = normalizeSymbol(symbol);
+    const effectiveTargetEndMs = Number.isFinite(Number(targetEndMs)) ? Number(targetEndMs) : Math.min(dayEndMs, this.now());
+    const coverage = this.#reconcileCoverageCheckpoint({
       symbol: normalizedSymbol,
       dayStartMs,
       dayEndMs,
-      targetEndMs,
-      progressCallback,
-      shouldStop
+      targetEndMs: effectiveTargetEndMs,
+      coverage: this.getHistoricalCoverage?.(normalizedSymbol, dayStartMs) || null
     });
 
-    const stats = this.getTradeStatsByRange?.(normalizedSymbol, dayStartMs, targetEndMs) || null;
+    if (!isCoverageSufficient(coverage, effectiveTargetEndMs)) {
+      throw new HistoricalCoverageError(
+        `Historical trade coverage is not ready for ${normalizedSymbol} on ${formatUtcDay(dayStartMs)}. Replay must wait for coverage preparation to complete.`,
+        { symbol: normalizedSymbol, dayStartMs, dayEndMs, targetEndMs: effectiveTargetEndMs, reason: 'coverage_not_prepared' }
+      );
+    }
+
+    this.#emitHydrationProgress(progressCallback, {
+      stage: coveragePlanEntry?.isCurrentUtcDay
+        ? 'Loading prepared current-day tail from local cache'
+        : 'Loading prepared historical session from local cache',
+      hydration: {
+        source: coverage?.source || null,
+        status: 'complete',
+        rowsIngested: Number(coverage?.checkpoint_rows || coverage?.trade_count || 0),
+        pagesIngested: coverage?.source === 'bulk-file' ? 1 : 0,
+        checkpointTimeMs: coverage?.checkpoint_time_ms ?? coverage?.coverage_end_ms ?? null,
+        lastAggTradeId: coverage?.last_agg_trade_id ?? null,
+        retry: null,
+        percent: 100
+      }
+    });
+
+    const stats = this.getTradeStatsByRange?.(normalizedSymbol, dayStartMs, effectiveTargetEndMs) || null;
     if (!Number(stats?.count || 0)) {
       throw new HistoricalCoverageError(
         `Historical trade coverage missing for ${normalizedSymbol} on ${formatUtcDay(dayStartMs)}.`,
-        { symbol: normalizedSymbol, dayStartMs, dayEndMs, targetEndMs, reason: 'no_trades_after_hydration' }
+        { symbol: normalizedSymbol, dayStartMs, dayEndMs, targetEndMs: effectiveTargetEndMs, reason: 'no_trades_after_hydration' }
       );
     }
 
     const trades = this.streamTradesByRange
-      ? this.streamTradesByRange(normalizedSymbol, dayStartMs, targetEndMs, this.streamChunkSize)
-      : this.loadTradesByRange(normalizedSymbol, dayStartMs, targetEndMs, null);
+      ? this.streamTradesByRange(normalizedSymbol, dayStartMs, effectiveTargetEndMs, this.streamChunkSize)
+      : this.loadTradesByRange(normalizedSymbol, dayStartMs, effectiveTargetEndMs, null);
 
     const seedTrade = await this.#ensureSeedTrade({
       symbol: normalizedSymbol,
@@ -115,14 +321,36 @@ export class HistoricalBacktestDataService {
     return {
       trades,
       seedTrade,
-      targetEndMs,
+      targetEndMs: effectiveTargetEndMs,
       tradeCount: Number(stats?.count || 0),
       hydrationSource: coverage?.source || null,
       lastAggTradeId: coverage?.last_agg_trade_id ?? null
     };
   }
 
-  async #ensureDayCoverage({ symbol, dayStartMs, dayEndMs, targetEndMs, progressCallback, shouldStop }) {
+  async loadDay({ symbol, dayStartMs, dayEndMs, progressCallback, shouldStop }) {
+    const startDate = formatUtcDay(dayStartMs);
+    const plan = await this.prepareCoverage({
+      symbol,
+      startDate,
+      endDate: formatUtcDay(dayEndMs),
+      includeCurrentDay: true,
+      progressCallback,
+      shouldStop
+    });
+    const day = plan.days[0];
+    return this.loadPreparedDay({
+      symbol,
+      dayStartMs,
+      dayEndMs,
+      targetEndMs: day?.targetEndMs,
+      progressCallback,
+      shouldStop,
+      coveragePlanEntry: day
+    });
+  }
+
+  async #ensureDayCoverage({ symbol, dayStartMs, dayEndMs, targetEndMs, progressCallback, shouldStop, coveragePlanEntry = null }) {
     const persistedCoverage = this.getHistoricalCoverage?.(symbol, dayStartMs) || null;
     const checkpoint = this.#reconcileCoverageCheckpoint({
       symbol,
@@ -134,9 +362,16 @@ export class HistoricalBacktestDataService {
 
     if (isCoverageSufficient(checkpoint, targetEndMs)) return checkpoint;
 
-    const completedUtcDay = isCompletedUtcDay(dayEndMs, this.now());
-    const gapMs = Math.max(0, targetEndMs - Number(checkpoint.coverage_end_ms || (dayStartMs - 1)));
-    const preferBulk = Boolean(this.bulkDataBaseUrl) && completedUtcDay && gapMs > this.smallGapThresholdMs;
+    const classification = coveragePlanEntry?.classification || inferCoverageClassification({
+      checkpoint,
+      targetEndMs,
+      dayStartMs,
+      dayEndMs,
+      nowMs: this.now(),
+      smallGapThresholdMs: this.smallGapThresholdMs
+    });
+    const completedUtcDay = coveragePlanEntry?.completedUtcDay ?? isCompletedUtcDay(dayEndMs, this.now());
+    const preferBulk = Boolean(this.bulkDataBaseUrl) && completedUtcDay && classification === 'completed-day-bulk';
 
     let lastCoverage = checkpoint;
     let bulkFailure = null;
@@ -179,7 +414,10 @@ export class HistoricalBacktestDataService {
         checkpoint: lastCoverage,
         progressCallback,
         shouldStop,
-        fallbackReason: bulkFailure?.message || null
+        fallbackReason: bulkFailure?.message || null,
+        sourceLabel: classification === 'current-day-tail'
+          ? 'current-day-tail'
+          : (bulkFailure ? 'binance-rest-fallback' : 'binance-rest')
       });
     }
 
@@ -206,7 +444,8 @@ export class HistoricalBacktestDataService {
       source: lastCoverage?.source || (preferBulk ? 'bulk-file' : 'binance-rest'),
       stats: statsAfter,
       latestTrade: this.#loadLatestTradeInRange(symbol, dayStartMs, targetEndMs),
-      status: targetEndMs >= dayEndMs ? 'complete' : 'partial'
+      status: targetEndMs >= dayEndMs ? 'complete' : 'partial',
+      coverageEndMs: targetEndMs
     });
   }
 
@@ -260,7 +499,7 @@ export class HistoricalBacktestDataService {
     return this.loadLatestTradeBefore?.(symbol, dayStartMs) || seedTrade;
   }
 
-  async #hydrateWithRest({ symbol, dayStartMs, dayEndMs, targetEndMs, checkpoint, progressCallback, shouldStop, fallbackReason = null }) {
+  async #hydrateWithRest({ symbol, dayStartMs, dayEndMs, targetEndMs, checkpoint, progressCallback, shouldStop, fallbackReason = null, sourceLabel = 'binance-rest' }) {
     const resumeState = buildResumeState({ checkpoint, dayStartMs });
     if (resumeState.startMs > targetEndMs && resumeState.nextFromId == null) return checkpoint;
 
@@ -275,7 +514,7 @@ export class HistoricalBacktestDataService {
       this.#emitHydrationProgress(progressCallback, {
         stage: `Hydrating Binance REST page ${pageCount}`,
         hydration: {
-          source: 'binance-rest',
+          source: sourceLabel,
           status: 'running',
           rowsIngested,
           pagesIngested: pageCount,
@@ -297,7 +536,7 @@ export class HistoricalBacktestDataService {
           this.#emitHydrationProgress(progressCallback, {
             stage: `Retrying Binance REST page ${pageCount} (attempt ${attempt}/${this.retryAttempts}) in ${retryInMs}ms`,
             hydration: {
-              source: 'binance-rest',
+              source: sourceLabel,
               status: 'retrying',
               rowsIngested,
               pagesIngested: pageCount,
@@ -333,7 +572,7 @@ export class HistoricalBacktestDataService {
           dayStartMs,
           dayEndMs,
           targetEndMs,
-          source: fallbackReason ? 'binance-rest-fallback' : 'binance-rest',
+          source: sourceLabel,
           latestTrade: checkpointTrade,
           status: lastPersistedTradeTime >= targetEndMs ? 'complete' : 'partial'
         });
@@ -468,7 +707,16 @@ export class HistoricalBacktestDataService {
       );
     }
 
-    return this.getHistoricalCoverage?.(symbol, dayStartMs) || checkpoint;
+    return this.#saveCoverageCheckpoint({
+      symbol,
+      dayStartMs,
+      dayEndMs,
+      targetEndMs,
+      source: 'bulk-file',
+      latestTrade: this.#loadLatestTradeInRange(symbol, dayStartMs, targetEndMs),
+      status: targetEndMs >= dayEndMs ? 'complete' : 'partial',
+      coverageEndMs: targetEndMs
+    });
   }
 
   #flushBulkBatch({ symbol, dayStartMs, dayEndMs, targetEndMs, state, progressCallback, forceStatus = null }) {
@@ -620,7 +868,7 @@ export class HistoricalBacktestDataService {
     };
   }
 
-  #saveCoverageCheckpoint({ symbol, dayStartMs, dayEndMs, targetEndMs, source, latestTrade = null, stats = null, status = 'partial' }) {
+  #saveCoverageCheckpoint({ symbol, dayStartMs, dayEndMs, targetEndMs, source, latestTrade = null, stats = null, status = 'partial', coverageEndMs = null }) {
     const effectiveStats = stats || this.getTradeStatsByRange?.(symbol, dayStartMs, targetEndMs) || null;
     const effectiveLatestTrade = latestTrade || this.#loadLatestTradeInRange(symbol, dayStartMs, targetEndMs) || null;
     const record = {
@@ -628,7 +876,11 @@ export class HistoricalBacktestDataService {
       day_start_ms: dayStartMs,
       day_end_ms: dayEndMs,
       coverage_start_ms: dayStartMs,
-      coverage_end_ms: Math.max(Number(effectiveLatestTrade?.trade_time || (dayStartMs - 1)), dayStartMs - 1),
+      coverage_end_ms: Number.isFinite(Number(coverageEndMs))
+        ? Math.max(Number(coverageEndMs), dayStartMs - 1)
+        : (status === 'complete'
+            ? Math.max(Number(targetEndMs || (dayStartMs - 1)), dayStartMs - 1)
+            : Math.max(Number(effectiveLatestTrade?.trade_time || (dayStartMs - 1)), dayStartMs - 1)),
       trade_count: Number(effectiveStats?.count || 0),
       first_trade_time: effectiveStats?.minTradeTime ?? null,
       last_trade_time: effectiveStats?.maxTradeTime ?? null,
@@ -662,6 +914,29 @@ export class HistoricalBacktestDataService {
         retry: hydration?.retry || null,
         percent: Number.isFinite(Number(hydration?.percent)) ? Number(hydration.percent) : null
       }
+    });
+  }
+
+  #emitCoverageProgress(progressCallback, { phase, stage, progressPct, coverage, hydration, currentDate, currentDay, totalDays }) {
+    progressCallback?.({
+      phase,
+      stage,
+      progressPct,
+      coverage: {
+        totalDays: Number(coverage?.totalDays || 0),
+        readyDays: Number(coverage?.readyDays || 0),
+        hydratableDays: Number(coverage?.hydratableDays || 0),
+        waitingOnCoverage: Boolean(coverage?.waitingOnCoverage),
+        hydratingDay: coverage?.hydratingDay || null,
+        includeCurrentDay: Boolean(coverage?.includeCurrentDay),
+        requestedCurrentUtcDay: Boolean(coverage?.requestedCurrentUtcDay),
+        currentUtcDaySlowPath: Boolean(coverage?.currentUtcDaySlowPath),
+        classifications: Array.isArray(coverage?.classifications) ? coverage.classifications : []
+      },
+      hydration: hydration || null,
+      currentDate: currentDate || null,
+      currentDay: currentDay ?? null,
+      totalDays: totalDays ?? null
     });
   }
 }
@@ -749,6 +1024,41 @@ function normalizeSymbol(symbol) {
   return String(symbol || '').toUpperCase();
 }
 
+function normalizeUtcDayInput(value) {
+  const date = new Date(value);
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+}
+
+function* iterateUtcDays(startDate, endDate) {
+  let cursor = startDate.getTime();
+  let dayIndex = 0;
+  while (cursor <= endDate.getTime()) {
+    yield {
+      dayStartMs: cursor,
+      dayEndMs: cursor + 86400000 - 1,
+      isoDate: new Date(cursor).toISOString().slice(0, 10),
+      dayIndex
+    };
+    cursor += 86400000;
+    dayIndex += 1;
+  }
+}
+
+function summarizeCoverageClassifications(days = []) {
+  const counts = new Map();
+  for (const day of days) {
+    counts.set(day.classification, (counts.get(day.classification) || 0) + 1);
+  }
+  return [...counts.entries()].map(([classification, count]) => ({ classification, count }));
+}
+
+function inferCoverageClassification({ checkpoint, targetEndMs, dayStartMs, dayEndMs, nowMs, smallGapThresholdMs }) {
+  if (isCoverageSufficient(checkpoint, targetEndMs)) return 'already-covered-local';
+  if (!isCompletedUtcDay(dayEndMs, nowMs)) return 'current-day-tail';
+  const gapMs = Math.max(0, targetEndMs - Number(checkpoint?.coverage_end_ms || (dayStartMs - 1)));
+  return gapMs <= smallGapThresholdMs ? 'small-gap-fill' : 'completed-day-bulk';
+}
+
 function formatUtcDay(dayStartMs) {
   return new Date(dayStartMs).toISOString().slice(0, 10);
 }
@@ -757,6 +1067,10 @@ function buildBulkAggTradesUrl(baseUrl, symbol, dayStartMs) {
   const safeBase = String(baseUrl || DEFAULT_BINANCE_BULK_BASE_URL).replace(/\/$/, '');
   const normalizedSymbol = normalizeSymbol(symbol);
   return `${safeBase}/data/spot/daily/aggTrades/${normalizedSymbol}/${normalizedSymbol}-aggTrades-${formatUtcDay(dayStartMs)}.zip`;
+}
+
+function getUtcDayStartMs(value) {
+  return startOfUtcDay(value);
 }
 
 function isCompletedUtcDay(dayEndMs, nowMs) {

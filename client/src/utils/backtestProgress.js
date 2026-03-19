@@ -16,8 +16,10 @@ export function deriveBacktestProgress(job) {
     marker: latest?.status === 'failed' && errorMessage ? 'Failed' : fallbackMarker,
     errorMessage,
     phase: progressDetails?.phase || null,
+    coverage: progressDetails?.coverage || null,
     hydration: progressDetails?.hydration || null,
-    replay: progressDetails?.replay || null
+    replay: progressDetails?.replay || null,
+    primaryLabel: derivePrimaryLabel(progressDetails?.phase, progressDetails?.coverage)
   };
 }
 
@@ -48,4 +50,15 @@ function parseProgressJson(value) {
   } catch {
     return null;
   }
+}
+
+function derivePrimaryLabel(phase, coverage) {
+  if (phase === 'planning' || phase === 'hydrating') return 'Preparing historical coverage';
+  if (phase === 'replaying') return 'Replaying historical sessions';
+  if (phase === 'finalizing') return 'Finalizing results';
+  if (phase === 'completed') return 'Completed';
+  if (phase === 'failed') return 'Failed';
+  if (phase === 'cancelled') return 'Cancelled';
+  if (coverage?.waitingOnCoverage) return 'Preparing historical coverage';
+  return 'Waiting to start';
 }

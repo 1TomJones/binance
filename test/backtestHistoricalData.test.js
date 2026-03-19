@@ -5,6 +5,7 @@ import { deflateRawSync } from 'node:zlib';
 
 import { BacktestRunner } from '../server/quant/backtestRunner.js';
 import { HistoricalBacktestDataService, HistoricalCoverageError } from '../server/quant/historicalBacktestDataService.js';
+import { BacktestJobService } from '../server/quant/backtestJobService.js';
 import { LivePaperRunner } from '../server/quant/livePaperRunner.js';
 import { StrategyExecutionEngine } from '../server/quant/strategyExecutionEngine.js';
 
@@ -105,7 +106,14 @@ function createInMemoryHistoricalService({
 } = {}) {
   const storedTrades = [];
   const coverageRecords = [];
-  let coverageRecord = initialCoverage ? { ...initialCoverage } : null;
+  const coverageStore = new Map();
+  if (initialCoverage instanceof Map) {
+    for (const [dayStartMs, record] of initialCoverage.entries()) coverageStore.set(dayStartMs, { ...record });
+  } else if (Array.isArray(initialCoverage)) {
+    for (const record of initialCoverage) coverageStore.set(record.day_start_ms, { ...record });
+  } else if (initialCoverage?.day_start_ms != null) {
+    coverageStore.set(initialCoverage.day_start_ms, { ...initialCoverage });
+  }
 
   const loadRange = loadTradesByRange || ((_symbol, startMs, endMs) => (
     storedTrades
@@ -114,11 +122,11 @@ function createInMemoryHistoricalService({
   ));
 
   const service = new HistoricalBacktestDataService({
-    getHistoricalCoverage: () => coverageRecord,
+    getHistoricalCoverage: (_symbol, dayStartMs) => coverageStore.get(dayStartMs) || null,
     saveHistoricalCoverage: (record) => {
       coverageRecords.push(record);
-      coverageRecord = { ...record };
-      return coverageRecord;
+      coverageStore.set(record.day_start_ms, { ...record });
+      return coverageStore.get(record.day_start_ms);
     },
     loadTradesByRange: loadRange,
     loadLatestTradeBefore,
@@ -153,7 +161,7 @@ function createInMemoryHistoricalService({
     service,
     storedTrades,
     coverageRecords,
-    getCoverageRecord: () => coverageRecord
+    getCoverageRecord: (dayStartMs = null) => (dayStartMs == null ? [...coverageStore.values()].at(-1) || null : coverageStore.get(dayStartMs) || null)
   };
 }
 
@@ -696,3 +704,206 @@ async function collectAsync(iterable) {
   for await (const value of iterable) rows.push(value);
   return rows;
 }
+
+test('coverage planner classifies ready, bulk, gap-fill, and current-day tail sessions up front', () => {
+  const firstDayMs = Date.UTC(2026, 2, 16);
+  const secondDayMs = firstDayMs + DAY_MS;
+  const thirdDayMs = secondDayMs + DAY_MS;
+  const fourthDayMs = thirdDayMs + DAY_MS;
+  const initialCoverage = new Map([
+    [firstDayMs, {
+      symbol: 'BTCUSDT',
+      day_start_ms: firstDayMs,
+      day_end_ms: firstDayMs + DAY_MS - 1,
+      coverage_start_ms: firstDayMs,
+      coverage_end_ms: firstDayMs + DAY_MS - 1,
+      trade_count: 10,
+      first_trade_time: firstDayMs + 1_000,
+      last_trade_time: firstDayMs + DAY_MS - 2_000,
+      last_agg_trade_id: 10,
+      checkpoint_time_ms: firstDayMs + DAY_MS - 2_000,
+      checkpoint_rows: 10,
+      status: 'complete',
+      source: 'bulk-file'
+    }],
+    [secondDayMs, {
+      symbol: 'BTCUSDT',
+      day_start_ms: secondDayMs,
+      day_end_ms: secondDayMs + DAY_MS - 1,
+      coverage_start_ms: secondDayMs,
+      coverage_end_ms: secondDayMs + DAY_MS - 1 - (60 * 1000),
+      trade_count: 20,
+      first_trade_time: secondDayMs + 1_000,
+      last_trade_time: secondDayMs + DAY_MS - 1 - (60 * 1000),
+      last_agg_trade_id: 20,
+      checkpoint_time_ms: secondDayMs + DAY_MS - 1 - (60 * 1000),
+      checkpoint_rows: 20,
+      status: 'partial',
+      source: 'binance-rest'
+    }]
+  ]);
+
+  const { service } = createInMemoryHistoricalService({
+    now: () => Date.UTC(2026, 2, 19, 12, 0, 0),
+    initialCoverage
+  });
+
+  const plan = service.planCoverageRange({
+    symbol: 'BTCUSDT',
+    startDate: '2026-03-16',
+    endDate: '2026-03-19',
+    includeCurrentDay: true
+  });
+
+  assert.equal(plan.days.length, 4);
+  assert.equal(plan.days[0].classification, 'already-covered-local');
+  assert.equal(plan.days[1].classification, 'small-gap-fill');
+  assert.equal(plan.days[2].classification, 'completed-day-bulk');
+  assert.equal(plan.days[3].classification, 'current-day-tail');
+  assert.equal(plan.readyDays, 1);
+  assert.equal(plan.hydratableDays, 3);
+  assert.equal(plan.requestedCurrentUtcDay, true);
+});
+
+test('current UTC day hydration is explicitly routed through the slower tail path', async () => {
+  const dayStartMs = Date.UTC(2026, 2, 19);
+  const requests = [];
+  const { service, getCoverageRecord } = createInMemoryHistoricalService({
+    bulkDataBaseUrl: 'https://bulk.example.test',
+    now: () => dayStartMs + (12 * 60 * 60 * 1000),
+    fetchImpl: async (url) => {
+      requests.push(String(url));
+      return createJsonResponse(200, [buildAggTrade(1, dayStartMs + 1_000)]);
+    }
+  });
+
+  const plan = await service.prepareCoverage({
+    symbol: 'BTCUSDT',
+    startDate: '2026-03-19',
+    endDate: '2026-03-19',
+    includeCurrentDay: true
+  });
+  const payload = await service.loadPreparedDay({
+    symbol: 'BTCUSDT',
+    dayStartMs,
+    dayEndMs: dayStartMs + DAY_MS - 1,
+    targetEndMs: plan.days[0].targetEndMs,
+    coveragePlanEntry: plan.days[0]
+  });
+
+  assert.equal(plan.days[0].classification, 'current-day-tail');
+  assert.equal(getCoverageRecord(dayStartMs)?.source, 'current-day-tail');
+  assert.equal(payload.hydrationSource, 'current-day-tail');
+  assert.ok(requests.every((url) => !url.endsWith('.zip')), 'current-day tail should not use the completed-day bulk ZIP path');
+});
+
+test('backtest jobs do not start replay until coverage preparation completes', async () => {
+  const progressEvents = [];
+  let prepared = false;
+  let completedResult = null;
+  let failedJob = null;
+
+  const jobState = {
+    1: { id: 1, status: 'queued', progress_pct: 0, current_marker: 'Queued' }
+  };
+
+  const historicalDataService = {
+    async prepareCoverage({ progressCallback }) {
+      progressCallback({
+        phase: 'planning',
+        stage: 'Preparing historical coverage',
+        progressPct: 5,
+        coverage: {
+          totalDays: 2,
+          readyDays: 0,
+          hydratableDays: 2,
+          waitingOnCoverage: true,
+          hydratingDay: null,
+          includeCurrentDay: false,
+          requestedCurrentUtcDay: false,
+          currentUtcDaySlowPath: false,
+          classifications: []
+        },
+        currentDate: '2026-03-15',
+        currentDay: 1,
+        totalDays: 2,
+        hydration: null
+      });
+      prepared = true;
+      return {
+        totalDays: 2,
+        readyDays: 2,
+        hydratableDays: 0,
+        waitingOnCoverage: false,
+        includeCurrentDay: false,
+        requestedCurrentUtcDay: false,
+        days: [
+          { isoDate: '2026-03-15', dayIndex: 0, classification: 'already-covered-local' },
+          { isoDate: '2026-03-16', dayIndex: 1, classification: 'already-covered-local' }
+        ]
+      };
+    }
+  };
+
+  const service = new BacktestJobService({
+    backtestRunner: {
+      async run({ progressCallback }) {
+        assert.equal(prepared, true, 'replay must not start before coverage preparation finishes');
+        progressCallback({
+          processed: 0,
+          total: 1,
+          progressPct: 60,
+          marker: 'Replaying historical sessions',
+          currentDate: '2026-03-15',
+          currentDay: 1,
+          totalDays: 2,
+          totalTrades: 0,
+          elapsedMs: 1,
+          phase: 'replaying',
+          hydration: null,
+          replay: { status: 'running', replayedTrades: 0, totalTrades: 10, percent: 10 }
+        });
+        return {
+          metrics: {},
+          analyses: {},
+          sessionResults: [],
+          cumulativePnlSeries: [],
+          equitySeries: [],
+          drawdownSeries: [],
+          trades: []
+        };
+      }
+    },
+    historicalDataService,
+    resolveStrategy: () => ({ strategy: buildStrategy(), summary: { key: 'test' } }),
+    createJob: () => jobState[1],
+    updateJob: (id, patch) => {
+      jobState[id] = { ...jobState[id], ...patch };
+      progressEvents.push(jobState[id]);
+      return jobState[id];
+    },
+    completeJob: (id, patch) => {
+      jobState[id] = { ...jobState[id], ...patch, status: 'completed' };
+      completedResult = jobState[id];
+      return completedResult;
+    },
+    failJob: (_id, error) => { failedJob = error; },
+    saveResult: () => ({ id: 99 }),
+    listJobProgress: () => [],
+    getJobById: (id) => jobState[id]
+  });
+
+  service.start({
+    strategyRef: { kind: 'built_in', key: 'test' },
+    runConfig: { startDate: '2026-03-15', endDate: '2026-03-16', includeCurrentDay: false }
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  assert.equal(failedJob, null);
+  assert.equal(prepared, true);
+  assert.equal(completedResult?.status, 'completed');
+  assert.equal(progressEvents[0]?.current_marker, 'Preparing historical coverage');
+  assert.ok(progressEvents.some((event) => event.current_marker === 'Preparing historical coverage'));
+  assert.ok(progressEvents.some((event) => event.current_marker === 'Replaying historical sessions'));
+});
