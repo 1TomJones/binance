@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { deriveBacktestProgress } from '../client/src/utils/backtestProgress.js';
+import { buildDefaultBacktestDateRange, rangeIncludesCurrentUtcDay, shouldPollLiveWorkspace } from '../client/src/utils/quantWorkspaceMode.js';
 
 test('deriveBacktestProgress surfaces the exact job error message for failed backtests', () => {
   const progress = deriveBacktestProgress({
@@ -10,6 +11,17 @@ test('deriveBacktestProgress surfaces the exact job error message for failed bac
     current_marker: 'Failed',
     progress_json: JSON.stringify({
       phase: 'failed',
+      coverage: {
+        totalDays: 3,
+        readyDays: 1,
+        hydratableDays: 2,
+        waitingOnCoverage: true,
+        hydratingDay: '2026-03-15',
+        includeCurrentDay: false,
+        requestedCurrentUtcDay: false,
+        currentUtcDaySlowPath: false,
+        classifications: []
+      },
       hydration: {
         source: 'binance-rest',
         status: 'retrying',
@@ -45,4 +57,44 @@ test('deriveBacktestProgress surfaces the exact job error message for failed bac
   assert.equal(progress.currentDayLabel, 'Day 2 / 3');
   assert.equal(progress.phase, 'failed');
   assert.equal(progress.hydration?.retry?.attempt, 2);
+  assert.equal(progress.coverage?.hydratableDays, 2);
+});
+
+test('deriveBacktestProgress promotes the simpler top-level backtest phases', () => {
+  const progress = deriveBacktestProgress({
+    status: 'running',
+    progress_pct: 15,
+    current_marker: 'Preparing historical coverage',
+    progress_json: JSON.stringify({
+      phase: 'hydrating',
+      coverage: {
+        totalDays: 4,
+        readyDays: 1,
+        hydratableDays: 3,
+        waitingOnCoverage: true,
+        hydratingDay: '2026-03-18',
+        includeCurrentDay: true,
+        requestedCurrentUtcDay: true,
+        currentUtcDaySlowPath: true,
+        classifications: []
+      },
+      hydration: null,
+      replay: null
+    })
+  });
+
+  assert.equal(progress.primaryLabel, 'Preparing historical coverage');
+  assert.equal(progress.coverage?.currentUtcDaySlowPath, true);
+});
+
+test('backtest mode does not poll live workspace metrics while live mode still does', () => {
+  assert.equal(shouldPollLiveWorkspace('backtest'), false);
+  assert.equal(shouldPollLiveWorkspace('live'), true);
+});
+
+test('default backtest range prefers completed UTC days only and excludes today', () => {
+  const defaults = buildDefaultBacktestDateRange(new Date('2026-03-19T12:00:00.000Z'));
+  assert.equal(defaults.defaultEndDate, '2026-03-18');
+  assert.equal(rangeIncludesCurrentUtcDay(defaults.defaultStartDate, defaults.defaultEndDate, new Date('2026-03-19T12:00:00.000Z')), false);
+  assert.equal(rangeIncludesCurrentUtcDay('2026-03-18', '2026-03-19', new Date('2026-03-19T12:00:00.000Z')), true);
 });
