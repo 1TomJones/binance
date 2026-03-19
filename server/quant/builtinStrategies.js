@@ -70,9 +70,6 @@ const BUILT_IN_STRATEGIES = {
             { type: 'max_holding_bars' }
           ]
         }
-      },
-      backtest_defaults: {
-        initial_balance: 10000
       }
     },
     description: 'Live paper trend follower using session VWAP alignment and rising/falling CVD confirmation.',
@@ -115,14 +112,6 @@ export function listBuiltInLiveStrategies() {
   return Object.values(BUILT_IN_STRATEGIES).map(buildDescriptor);
 }
 
-export function listBuiltInStrategyCatalog() {
-  return Object.values(BUILT_IN_STRATEGIES).map(buildDescriptor);
-}
-
-export function getBuiltInLiveStrategy(strategyKey) {
-  const definition = BUILT_IN_STRATEGIES[strategyKey];
-  return definition ? buildDescriptor(definition) : null;
-}
 
 export function getBuiltInStrategyDefinition(strategyKey) {
   const definition = BUILT_IN_STRATEGIES[strategyKey];
@@ -144,6 +133,5 @@ function normalizeStrategy(strategy) {
     positionManagement: strategy.position_management,
     entryRules: strategy.entry_rules,
     exitRules: strategy.exit_rules,
-    backtestDefaults: strategy.backtest_defaults
   };
 }

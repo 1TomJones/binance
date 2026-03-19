@@ -43,35 +43,6 @@ db.exec(`
     created_at INTEGER NOT NULL
   );
 
-  CREATE TABLE IF NOT EXISTS quant_backtest_jobs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    strategy_id INTEGER,
-    status TEXT NOT NULL,
-    progress_pct INTEGER NOT NULL DEFAULT 0,
-    processed_items INTEGER NOT NULL DEFAULT 0,
-    current_marker TEXT,
-    progress_json TEXT,
-    current_date TEXT,
-    current_day INTEGER,
-    total_days INTEGER,
-    closed_trade_count INTEGER NOT NULL DEFAULT 0,
-    elapsed_ms INTEGER,
-    run_config_json TEXT,
-    result_id INTEGER,
-    error_message TEXT,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS quant_backtest_results (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_id INTEGER NOT NULL,
-    summary_json TEXT,
-    equity_series_json TEXT,
-    trade_log_json TEXT,
-    created_at INTEGER NOT NULL
-  );
-
   CREATE TABLE IF NOT EXISTS quant_live_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     strategy_id INTEGER NOT NULL UNIQUE,
@@ -79,55 +50,7 @@ db.exec(`
     state_json TEXT NOT NULL,
     updated_at INTEGER NOT NULL
   );
-
-  CREATE TABLE IF NOT EXISTS quant_job_progress (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_id INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    progress_pct INTEGER NOT NULL,
-    processed_items INTEGER,
-    current_marker TEXT,
-    progress_json TEXT,
-    current_date TEXT,
-    current_day INTEGER,
-    total_days INTEGER,
-    closed_trade_count INTEGER,
-    elapsed_ms INTEGER,
-    ts INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS historical_trade_coverage (
-    symbol TEXT NOT NULL,
-    day_start_ms INTEGER NOT NULL,
-    day_end_ms INTEGER NOT NULL,
-    coverage_start_ms INTEGER NOT NULL,
-    coverage_end_ms INTEGER NOT NULL,
-    trade_count INTEGER NOT NULL DEFAULT 0,
-    first_trade_time INTEGER,
-    last_trade_time INTEGER,
-    last_agg_trade_id INTEGER,
-    checkpoint_time_ms INTEGER,
-    checkpoint_rows INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL,
-    source TEXT NOT NULL,
-    updated_at INTEGER NOT NULL,
-    PRIMARY KEY (symbol, day_start_ms)
-  );
 `);
-
-ensureColumn('quant_backtest_jobs', 'current_date', 'TEXT');
-ensureColumn('quant_backtest_jobs', 'current_day', 'INTEGER');
-ensureColumn('quant_backtest_jobs', 'total_days', 'INTEGER');
-ensureColumn('quant_backtest_jobs', 'closed_trade_count', 'INTEGER NOT NULL DEFAULT 0');
-ensureColumn('quant_backtest_jobs', 'progress_json', 'TEXT');
-ensureColumn('quant_job_progress', 'current_date', 'TEXT');
-ensureColumn('quant_job_progress', 'current_day', 'INTEGER');
-ensureColumn('quant_job_progress', 'total_days', 'INTEGER');
-ensureColumn('quant_job_progress', 'closed_trade_count', 'INTEGER');
-ensureColumn('quant_job_progress', 'progress_json', 'TEXT');
-ensureColumn('historical_trade_coverage', 'last_agg_trade_id', 'INTEGER');
-ensureColumn('historical_trade_coverage', 'checkpoint_time_ms', 'INTEGER');
-ensureColumn('historical_trade_coverage', 'checkpoint_rows', 'INTEGER NOT NULL DEFAULT 0');
 
 const insertTradeStmt = db.prepare(`
   INSERT OR IGNORE INTO trades (
@@ -154,45 +77,6 @@ const insertStrategyStmt = db.prepare(`
   VALUES (@file_name, @raw_content, @parse_status, @metadata_json, @parse_message, @created_at)
 `);
 
-const createJobStmt = db.prepare(`
-  INSERT INTO quant_backtest_jobs (
-    strategy_id, status, progress_pct, processed_items, current_marker, progress_json, current_date, current_day, total_days, closed_trade_count, run_config_json, created_at, updated_at
-  ) VALUES (
-    @strategy_id, 'queued', 0, 0, 'Queued', NULL, NULL, NULL, NULL, 0, @run_config_json, @created_at, @updated_at
-  )
-`);
-
-const updateJobStmt = db.prepare(`
-  UPDATE quant_backtest_jobs
-  SET status = COALESCE(@status, status),
-      progress_pct = COALESCE(@progress_pct, progress_pct),
-      processed_items = COALESCE(@processed_items, processed_items),
-      current_marker = COALESCE(@current_marker, current_marker),
-      progress_json = COALESCE(@progress_json, progress_json),
-      current_date = COALESCE(@current_date, current_date),
-      current_day = COALESCE(@current_day, current_day),
-      total_days = COALESCE(@total_days, total_days),
-      closed_trade_count = COALESCE(@closed_trade_count, closed_trade_count),
-      elapsed_ms = COALESCE(@elapsed_ms, elapsed_ms),
-      result_id = COALESCE(@result_id, result_id),
-      error_message = COALESCE(@error_message, error_message),
-      updated_at = @updated_at
-  WHERE id = @id
-`);
-
-const insertResultStmt = db.prepare(`
-  INSERT INTO quant_backtest_results (job_id, summary_json, equity_series_json, trade_log_json, created_at)
-  VALUES (@job_id, @summary_json, @equity_series_json, @trade_log_json, @created_at)
-`);
-
-const insertProgressStmt = db.prepare(`
-  INSERT INTO quant_job_progress (
-    job_id, status, progress_pct, processed_items, current_marker, progress_json, current_date, current_day, total_days, closed_trade_count, elapsed_ms, ts
-  ) VALUES (
-    @job_id, @status, @progress_pct, @processed_items, @current_marker, @progress_json, @current_date, @current_day, @total_days, @closed_trade_count, @elapsed_ms, @ts
-  )
-`);
-
 const upsertLiveRunStmt = db.prepare(`
   INSERT INTO quant_live_runs (strategy_id, status, state_json, updated_at)
   VALUES (@strategy_id, @status, @state_json, @updated_at)
@@ -201,81 +85,6 @@ const upsertLiveRunStmt = db.prepare(`
     state_json = excluded.state_json,
     updated_at = excluded.updated_at
 `);
-
-const upsertHistoricalTradeCoverageStmt = db.prepare(`
-  INSERT INTO historical_trade_coverage (
-    symbol,
-    day_start_ms,
-    day_end_ms,
-    coverage_start_ms,
-    coverage_end_ms,
-    trade_count,
-    first_trade_time,
-    last_trade_time,
-    last_agg_trade_id,
-    checkpoint_time_ms,
-    checkpoint_rows,
-    status,
-    source,
-    updated_at
-  ) VALUES (
-    @symbol,
-    @day_start_ms,
-    @day_end_ms,
-    @coverage_start_ms,
-    @coverage_end_ms,
-    @trade_count,
-    @first_trade_time,
-    @last_trade_time,
-    @last_agg_trade_id,
-    @checkpoint_time_ms,
-    @checkpoint_rows,
-    @status,
-    @source,
-    @updated_at
-  )
-  ON CONFLICT(symbol, day_start_ms) DO UPDATE SET
-    day_end_ms = excluded.day_end_ms,
-    coverage_start_ms = excluded.coverage_start_ms,
-    coverage_end_ms = excluded.coverage_end_ms,
-    trade_count = excluded.trade_count,
-    first_trade_time = excluded.first_trade_time,
-    last_trade_time = excluded.last_trade_time,
-    last_agg_trade_id = excluded.last_agg_trade_id,
-    checkpoint_time_ms = excluded.checkpoint_time_ms,
-    checkpoint_rows = excluded.checkpoint_rows,
-    status = excluded.status,
-    source = excluded.source,
-    updated_at = excluded.updated_at
-`);
-
-const QUANT_BACKTEST_JOB_UPDATE_DEFAULTS = Object.freeze({
-  status: null,
-  progress_pct: null,
-  processed_items: null,
-  current_marker: null,
-  progress_json: null,
-  current_date: null,
-  current_day: null,
-  total_days: null,
-  closed_trade_count: null,
-  elapsed_ms: null,
-  result_id: null,
-  error_message: null
-});
-
-function ensureColumn(tableName, columnName, columnDefinition) {
-  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
-  if (columns.some((column) => column.name === columnName)) return;
-  db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition}`);
-}
-
-function normalizeQuantBacktestJobPatch(patch = {}) {
-  return {
-    ...QUANT_BACKTEST_JOB_UPDATE_DEFAULTS,
-    ...(patch || {})
-  };
-}
 
 export function saveTrade(trade) {
   insertTradeStmt.run(trade);
@@ -336,7 +145,6 @@ export function getTradesByRange(symbol, start, end, limit = 20000) {
     LIMIT ?
   `).all(symbol, start, end, limit);
 }
-
 
 export function* streamTradesByRange(symbol, start, end, chunkSize = 5000) {
   const pageSize = Math.max(Number(chunkSize) || 0, 1);
@@ -413,21 +221,6 @@ export function getTradeStatsByRange(symbol, start, end) {
   `).get(symbol, start, end);
 }
 
-export function getHistoricalTradeCoverage(symbol, dayStartMs) {
-  return db.prepare(`
-    SELECT symbol, day_start_ms, day_end_ms, coverage_start_ms, coverage_end_ms, trade_count,
-           first_trade_time, last_trade_time, last_agg_trade_id, checkpoint_time_ms, checkpoint_rows,
-           status, source, updated_at
-    FROM historical_trade_coverage
-    WHERE symbol = ? AND day_start_ms = ?
-  `).get(symbol, dayStartMs);
-}
-
-export function saveHistoricalTradeCoverage(record) {
-  upsertHistoricalTradeCoverageStmt.run({ ...record, updated_at: Date.now() });
-  return getHistoricalTradeCoverage(record.symbol, record.day_start_ms);
-}
-
 export function getLatestBook(symbol) {
   return db.prepare(`
     SELECT symbol, bid_price, bid_qty, ask_price, ask_qty, ts
@@ -454,112 +247,6 @@ export function listQuantStrategies(limit = 100) {
     ORDER BY created_at DESC
     LIMIT ?
   `).all(limit);
-}
-
-export function createQuantBacktestJob(record) {
-  const now = Date.now();
-  const info = createJobStmt.run({ ...record, created_at: now, updated_at: now });
-  const job = getQuantBacktestJobById(info.lastInsertRowid);
-  saveQuantJobProgress({
-    job_id: job.id,
-    status: job.status,
-    progress_pct: job.progress_pct,
-    processed_items: job.processed_items,
-    current_marker: job.current_marker,
-    progress_json: job.progress_json,
-    current_date: job.current_date,
-    current_day: job.current_day,
-    total_days: job.total_days,
-    closed_trade_count: job.closed_trade_count,
-    elapsed_ms: job.elapsed_ms || 0
-  });
-  return job;
-}
-
-export function updateQuantBacktestJob(id, patch = {}) {
-  const normalizedPatch = normalizeQuantBacktestJobPatch(patch);
-  updateJobStmt.run({ id, ...normalizedPatch, updated_at: Date.now() });
-  const job = getQuantBacktestJobById(id);
-  if (!job) return null;
-  saveQuantJobProgress({
-    job_id: id,
-    status: job.status,
-    progress_pct: job.progress_pct,
-    processed_items: job.processed_items,
-    current_marker: job.current_marker,
-    progress_json: job.progress_json,
-    current_date: job.current_date,
-    current_day: job.current_day,
-    total_days: job.total_days,
-    closed_trade_count: job.closed_trade_count,
-    elapsed_ms: job.elapsed_ms || 0
-  });
-  return job;
-}
-
-export function completeQuantBacktestJob(id, patch) {
-  return updateQuantBacktestJob(id, { ...patch, status: 'completed', error_message: null });
-}
-
-export function failQuantBacktestJob(id, errorOrMessage, patch = {}) {
-  const existingJob = getQuantBacktestJobById(id);
-  const errorMessage = errorOrMessage instanceof Error
-    ? (errorOrMessage.stack || errorOrMessage.message)
-    : String(errorOrMessage || 'Backtest job failed.');
-
-  return updateQuantBacktestJob(id, {
-    progress_pct: existingJob?.progress_pct ?? 0,
-    processed_items: existingJob?.processed_items ?? 0,
-    current_date: existingJob?.current_date ?? null,
-    current_day: existingJob?.current_day ?? null,
-    total_days: existingJob?.total_days ?? null,
-    closed_trade_count: existingJob?.closed_trade_count ?? 0,
-    elapsed_ms: existingJob?.elapsed_ms ?? null,
-    status: 'failed',
-    error_message: errorMessage,
-    current_marker: patch.current_marker || 'Failed',
-    ...patch
-  });
-}
-
-export function getQuantBacktestJobById(id) {
-  return db.prepare('SELECT * FROM quant_backtest_jobs WHERE id = ?').get(id);
-}
-
-export function listQuantBacktestJobs(limit = 50) {
-  return db.prepare(`
-    SELECT j.*, s.file_name as strategy_file_name, s.metadata_json
-    FROM quant_backtest_jobs j
-    LEFT JOIN quant_strategies s ON s.id = j.strategy_id
-    ORDER BY j.created_at DESC
-    LIMIT ?
-  `).all(limit);
-}
-
-export function saveQuantBacktestResult(record) {
-  const now = Date.now();
-  const info = insertResultStmt.run({ ...record, created_at: now });
-  return getQuantBacktestResultById(info.lastInsertRowid);
-}
-
-export function getQuantBacktestResultById(id) {
-  return db.prepare('SELECT * FROM quant_backtest_results WHERE id = ?').get(id);
-}
-
-export function getQuantResultByJobId(jobId) {
-  return db.prepare('SELECT * FROM quant_backtest_results WHERE job_id = ?').get(jobId);
-}
-
-export function saveQuantJobProgress(record) {
-  insertProgressStmt.run({ ...record, ts: Date.now() });
-}
-
-export function listQuantJobProgress(jobId) {
-  return db.prepare(`
-    SELECT * FROM quant_job_progress
-    WHERE job_id = ?
-    ORDER BY ts ASC
-  `).all(jobId);
 }
 
 export function saveQuantLiveRun({ strategyId, status, stateJson }) {

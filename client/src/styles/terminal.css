@@ -314,41 +314,6 @@ body { margin: 0; background: #060b13; }
   background: rgba(17, 54, 46, 0.8);
 }
 
-.quant-mode-switcher {
-  display: inline-grid;
-  grid-template-columns: repeat(2, 1fr);
-  padding: 4px;
-  background: rgba(8, 17, 30, 0.9);
-  border: 1px solid #1c2e4b;
-  border-radius: 999px;
-  gap: 4px;
-  margin-bottom: 16px;
-}
-
-.quant-mode-switcher button,
-.quant-inline-select,
-.quant-button,
-.quant-field input,
-.quant-field select,
-.quant-dropzone {
-  transition: all 140ms ease;
-}
-
-.quant-mode-switcher button {
-  border: 0;
-  background: transparent;
-  color: #8ba3c9;
-  border-radius: 999px;
-  padding: 10px 18px;
-  min-width: 120px;
-  cursor: pointer;
-}
-
-.quant-mode-switcher button.is-active {
-  background: linear-gradient(135deg, #164079, #204e8b);
-  color: #f4f8ff;
-}
-
 .quant-banner {
   border: 1px solid #1d3355;
   background: rgba(11, 22, 40, 0.9);
@@ -367,13 +332,8 @@ body { margin: 0; background: #060b13; }
 
 .quant-mode-grid,
 .quant-stack,
-.quant-results-grid,
 .quant-control-grid,
-.quant-form-grid,
-.quant-progress-grid,
-.quant-metric-grid,
-.quant-backtest-controls,
-.quant-analysis-stack {
+.quant-metric-grid {
   display: grid;
   gap: 14px;
 }
@@ -417,7 +377,6 @@ body { margin: 0; background: #060b13; }
 .quant-field small,
 .quant-rule-list label,
 .quant-metric-cell label,
-.quant-chart-title,
 .quant-empty {
   color: #7f96bb;
 }
@@ -460,6 +419,13 @@ body { margin: 0; background: #060b13; }
   align-self: end;
 }
 
+.quant-button,
+.quant-field input,
+.quant-field select,
+.quant-dropzone {
+  transition: all 140ms ease;
+}
+
 .quant-dropzone {
   grid-column: 1 / -1;
   min-height: 112px;
@@ -500,8 +466,7 @@ body { margin: 0; background: #060b13; }
 }
 
 .quant-field input,
-.quant-field select,
-.quant-inline-select {
+.quant-field select {
   border: 1px solid #243b5f;
   background: #08111e;
   color: #dce7fa;
@@ -511,8 +476,7 @@ body { margin: 0; background: #060b13; }
 }
 
 .quant-field input:focus,
-.quant-field select:focus,
-.quant-inline-select:focus {
+.quant-field select:focus {
   outline: none;
   border-color: #4a73ae;
   box-shadow: 0 0 0 3px rgba(74, 115, 174, 0.18);
@@ -562,58 +526,6 @@ body { margin: 0; background: #060b13; }
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.quant-form-grid {
-  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
-  align-items: start;
-}
-
-.quant-backtest-controls {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.quant-note-card {
-  display: grid;
-  gap: 8px;
-  align-content: start;
-  padding: 14px;
-  border-radius: 14px;
-  border: 1px solid #173052;
-  background: linear-gradient(180deg, rgba(12, 24, 41, 0.92), rgba(8, 17, 30, 0.84));
-}
-
-.quant-note-card strong {
-  color: #dce7fa;
-  font-size: 13px;
-}
-
-.quant-note-card span {
-  color: #89a1c7;
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-
-.quant-progress-panel {
-  display: grid;
-  gap: 14px;
-}
-
-.quant-progress-track {
-  width: 100%;
-  height: 14px;
-  border-radius: 999px;
-  background: rgba(8, 17, 30, 0.85);
-  border: 1px solid #182944;
-  overflow: hidden;
-}
-
-.quant-progress-fill {
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, #4ba3ff, #60e2c0);
-}
-
-.quant-progress-grid,
 .quant-metric-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
@@ -646,10 +558,6 @@ body { margin: 0; background: #060b13; }
   line-height: 1.5;
 }
 
-.quant-results-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
 .quant-mini-chart {
   display: flex;
   flex-direction: column;
@@ -669,15 +577,13 @@ body { margin: 0; background: #060b13; }
   color: #88a0c6;
 }
 
-.quant-chart-legend span,
-.quant-legend-row {
+.quant-chart-legend span {
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
 
-.quant-chart-legend i,
-.quant-legend-row i {
+.quant-chart-legend i {
   display: inline-block;
   width: 12px;
   height: 12px;
@@ -689,92 +595,11 @@ body { margin: 0; background: #060b13; }
 .quant-chart-legend .is-exit { background: #d8b04d; }
 .quant-chart-legend .is-vwap { background: #89aef7; }
 
-.quant-outcome-wrap {
-  display: grid;
-  grid-template-columns: 180px minmax(0, 1fr);
-  gap: 20px;
-  align-items: center;
-}
-
-.quant-outcome-donut {
-  width: 180px;
-  height: 180px;
-  border-radius: 50%;
-  display: grid;
-  place-items: center;
-}
-
-.quant-outcome-donut > div {
-  width: 88px;
-  height: 88px;
-  border-radius: 50%;
-  background: #0b1525;
-  border: 1px solid #1d3355;
-}
-
-.quant-outcome-legend,
-.quant-analysis-stack {
-  display: grid;
-  gap: 10px;
-}
-
-.quant-legend-row {
-  justify-content: space-between;
-  padding: 10px 12px;
-  border: 1px solid #14233a;
-  background: rgba(9, 17, 30, 0.82);
-  border-radius: 12px;
-}
-
-.quant-legend-row span {
-  flex: 1;
-  color: #d3def3;
-}
-
-.quant-bar-chart {
-  display: grid;
-  gap: 10px;
-}
-
-.quant-chart-title {
-  margin: 0;
-  font-size: 12px;
-}
-
-.quant-bar-row {
-  display: grid;
-  grid-template-columns: minmax(120px, 1.2fr) minmax(160px, 4fr) auto;
-  gap: 10px;
-  align-items: center;
-  font-size: 12px;
-}
-
-.quant-bar-track {
-  height: 10px;
-  background: rgba(8, 17, 30, 0.85);
-  border-radius: 999px;
-  overflow: hidden;
-  border: 1px solid #1b2f4d;
-}
-
-.quant-bar-fill {
-  height: 100%;
-  background: linear-gradient(90deg, #65a8ff, #60e2c0);
-}
-
-.quant-bar-fill.is-negative {
-  background: linear-gradient(90deg, #e16a74, #f2a2ab);
-}
-
 .quant-table-wrap {
   max-height: 360px;
   overflow: auto;
   border: 1px solid #132136;
   border-radius: 16px;
-}
-
-.quant-table-wrap-tall {
-  max-height: 520px;
 }
 
 .quant-table {
@@ -813,16 +638,12 @@ body { margin: 0; background: #060b13; }
 
 @media (max-width: 1280px) {
   .quant-mode-grid,
-  .quant-results-grid,
-  .quant-form-grid,
   .quant-source-panel {
     grid-template-columns: 1fr;
   }
 
   .quant-control-grid,
-  .quant-progress-grid,
-  .quant-metric-grid,
-  .quant-backtest-controls {
+  .quant-metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -837,14 +658,7 @@ body { margin: 0; background: #060b13; }
   }
 
   .quant-control-grid,
-  .quant-progress-grid,
-  .quant-metric-grid,
-  .quant-backtest-controls,
-  .quant-outcome-wrap {
-    grid-template-columns: 1fr;
-  }
-
-  .quant-bar-row {
+  .quant-metric-grid {
     grid-template-columns: 1fr;
   }
 }
