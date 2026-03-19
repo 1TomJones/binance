@@ -6,40 +6,20 @@ import { fileURLToPath } from 'url';
 import { Server } from 'socket.io';
 import { BinanceStreamService } from './binanceStream.js';
 import {
-  completeQuantBacktestJob,
-  createQuantBacktestJob,
-  failQuantBacktestJob,
-  getHistoricalTradeCoverage,
   getLatestBook,
-  getLatestTradeBefore,
-  getLatestTradeInRange,
-  getQuantBacktestJobById,
-  getQuantResultByJobId,
   getRecentTrades,
-  getTradeStatsByRange,
-  getTradesByRange,
-  streamTradesByRange,
-  listQuantBacktestJobs,
-  listQuantJobProgress,
   saveBookTicker,
-  saveHistoricalTradeCoverage,
-  saveQuantBacktestResult,
   saveQuantLiveRun,
   saveQuantStrategy,
   saveTrade,
-  saveTradesBatch,
-  updateQuantBacktestJob,
   getQuantStrategyById,
   listQuantStrategies
 } from './db.js';
-import { BacktestJobService } from './quant/backtestJobService.js';
 import { StrategyParser } from './quant/strategyParser.js';
-import { PAPER_EXECUTION_LIMITS, StrategyExecutionEngine } from './quant/strategyExecutionEngine.js';
-import { BacktestRunner } from './quant/backtestRunner.js';
-import { HistoricalBacktestDataService } from './quant/historicalBacktestDataService.js';
+import { StrategyExecutionEngine } from './quant/strategyExecutionEngine.js';
 import { enrichMarketCandles } from './quant/candleEnrichment.js';
 import { LivePaperRunner, LIVE_PAPER_LIMITS } from './quant/livePaperRunner.js';
-import { getBuiltInStrategyDefinition, listBuiltInStrategyCatalog } from './quant/builtinStrategies.js';
+import { getBuiltInStrategyDefinition, listBuiltInLiveStrategies } from './quant/builtinStrategies.js';
 import { StrategyUploadService, StrategyValidationService } from './quant/strategyServices.js';
 import {
   buildVolumeProfileFromCandles,
@@ -592,7 +572,7 @@ function resolveStrategy(strategyRef = {}) {
 }
 
 function buildStrategyCatalog() {
-  const builtIn = listBuiltInStrategyCatalog();
+  const builtIn = listBuiltInLiveStrategies();
   const uploaded = listQuantStrategies(50).map((record) => {
     const metadata = record.metadata_json ? JSON.parse(record.metadata_json) : {};
     return {
@@ -611,37 +591,6 @@ function buildStrategyCatalog() {
 
   return { builtIn, uploaded };
 }
-
-const historicalBacktestDataService = new HistoricalBacktestDataService({
-  getHistoricalCoverage: (symbol, dayStartMs) => getHistoricalTradeCoverage(symbol, dayStartMs),
-  saveHistoricalCoverage: (record) => saveHistoricalTradeCoverage(record),
-  loadTradesByRange: (symbol, startMs, endMs, limit) => getTradesByRange(symbol, startMs, endMs, limit),
-  loadLatestTradeBefore: (symbol, beforeMs) => getLatestTradeBefore(symbol, beforeMs),
-  loadLatestTradeInRange: (symbol, startMs, endMs) => getLatestTradeInRange(symbol, startMs, endMs),
-  getTradeStatsByRange: (symbol, startMs, endMs) => getTradeStatsByRange(symbol, startMs, endMs),
-  saveTradesBatch: (trades) => saveTradesBatch(trades),
-  streamTradesByRange: (symbol, startMs, endMs, chunkSize) => streamTradesByRange(symbol, startMs, endMs, chunkSize)
-});
-
-const backtestRunner = new BacktestRunner({
-  executionEngine,
-  historicalDataService: historicalBacktestDataService,
-  loadTrades: ({ symbol, startMs, endMs, limit }) => getTradesByRange(symbol, startMs, endMs, limit),
-  loadSeedTrade: ({ symbol, beforeMs }) => getLatestTradeBefore(symbol, beforeMs)
-});
-
-const backtestJobService = new BacktestJobService({
-  backtestRunner,
-  historicalDataService: historicalBacktestDataService,
-  resolveStrategy,
-  createJob: createQuantBacktestJob,
-  updateJob: updateQuantBacktestJob,
-  completeJob: completeQuantBacktestJob,
-  failJob: failQuantBacktestJob,
-  saveResult: saveQuantBacktestResult,
-  listJobProgress: listQuantJobProgress,
-  getJobById: getQuantBacktestJobById
-});
 
 function buildLiveMarketSnapshot() {
   const session = buildSessionPayload('1m');
@@ -743,55 +692,8 @@ app.post('/api/quant/strategy/upload', (req, res) => {
 app.get('/api/quant/strategies/catalog', (_req, res) => {
   return res.json({
     strategies: buildStrategyCatalog(),
-    limits: PAPER_EXECUTION_LIMITS
+    limits: LIVE_PAPER_LIMITS
   });
-});
-
-app.post('/api/quant/backtests', (req, res) => {
-  try {
-    const { strategyRef, runConfig } = req.body || {};
-    if (!strategyRef || !runConfig) {
-      return res.status(400).json({ error: 'strategyRef and runConfig are required.' });
-    }
-
-    const job = backtestJobService.start({ strategyRef, runConfig });
-    return res.status(202).json({ jobId: job.id, job });
-  } catch (error) {
-    return res.status(400).json({ error: error.message || 'Unable to start backtest.' });
-  }
-});
-
-app.post('/api/quant/backtests/:jobId/cancel', (req, res) => {
-  backtestJobService.cancel(Number(req.params.jobId));
-  return res.json({ ok: true });
-});
-
-app.get('/api/quant/backtests/:jobId', (req, res) => {
-  const jobId = Number(req.params.jobId);
-  const job = getQuantBacktestJobById(jobId);
-  if (!job) return res.status(404).json({ error: 'Job not found' });
-
-  const progress = backtestJobService.getProgress(jobId);
-  const result = getQuantResultByJobId(jobId);
-  return res.json({
-    job,
-    progress,
-    result: result ? {
-      ...result,
-      summary: JSON.parse(result.summary_json || '{}'),
-      series: JSON.parse(result.equity_series_json || '{}'),
-      tradeLog: JSON.parse(result.trade_log_json || '[]')
-    } : null
-  });
-});
-
-app.get('/api/quant/runs', (_req, res) => {
-  const jobs = listQuantBacktestJobs(100).map((job) => ({
-    ...job,
-    summary: job.result_id ? JSON.parse(getQuantResultByJobId(job.id)?.summary_json || '{}') : null,
-    strategyMetadata: job.metadata_json ? JSON.parse(job.metadata_json) : null
-  }));
-  return res.json({ runs: jobs });
 });
 
 app.get('/api/quant/live-metrics', (_req, res) => {

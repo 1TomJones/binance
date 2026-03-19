@@ -6,8 +6,7 @@ const REQUIRED_SECTIONS = [
   'risk',
   'position_management',
   'entry_rules',
-  'exit_rules',
-  'backtest_defaults'
+  'exit_rules'
 ];
 
 const ALLOWED_TIMEFRAMES = new Set(['1m', '5m', '15m', '1h']);

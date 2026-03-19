@@ -26,8 +26,7 @@ export class StrategyParser {
       risk: payload.risk,
       positionManagement: payload.position_management,
       entryRules: payload.entry_rules,
-      exitRules: payload.exit_rules,
-      backtestDefaults: payload.backtest_defaults
+      exitRules: payload.exit_rules
     };
 
     return {

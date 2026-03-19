@@ -1,12 +1,11 @@
 import { RuleEvaluator } from './ruleEvaluator.js';
 import { MetricsCalculator } from './metricsCalculator.js';
 
-export const PAPER_EXECUTION_LIMITS = {
+export const LIVE_EXECUTION_LIMITS = {
   orderSizeMin: 0.0001,
   orderSizeMax: 0.005,
   orderSizeStep: 0.0001,
   initialBalance: 10000,
-  maxReplaySpeed: 60
 };
 
 const DEFAULT_SYNTHETIC_SPREAD_BPS = 0.75;
@@ -18,7 +17,7 @@ export class StrategyExecutionEngine {
   }
 
   createRunState({ strategy, runConfig = {} } = {}) {
-    const initialBalance = Number(runConfig.initialBalance || strategy.backtestDefaults?.initial_balance || PAPER_EXECUTION_LIMITS.initialBalance);
+    const initialBalance = Number(runConfig.initialBalance || LIVE_EXECUTION_LIMITS.initialBalance);
     const orderSize = normalizeOrderSize(runConfig.orderSize);
 
     return {
@@ -333,10 +332,10 @@ function buildTradeLogRow(trade, action) {
 }
 
 function normalizeOrderSize(value) {
-  const numeric = Number(value || PAPER_EXECUTION_LIMITS.orderSizeMin);
-  const clamped = Math.min(PAPER_EXECUTION_LIMITS.orderSizeMax, Math.max(PAPER_EXECUTION_LIMITS.orderSizeMin, numeric));
-  const steps = Math.round(clamped / PAPER_EXECUTION_LIMITS.orderSizeStep);
-  return Number((steps * PAPER_EXECUTION_LIMITS.orderSizeStep).toFixed(4));
+  const numeric = Number(value || LIVE_EXECUTION_LIMITS.orderSizeMin);
+  const clamped = Math.min(LIVE_EXECUTION_LIMITS.orderSizeMax, Math.max(LIVE_EXECUTION_LIMITS.orderSizeMin, numeric));
+  const steps = Math.round(clamped / LIVE_EXECUTION_LIMITS.orderSizeStep);
+  return Number((steps * LIVE_EXECUTION_LIMITS.orderSizeStep).toFixed(4));
 }
 
 function round(value) {

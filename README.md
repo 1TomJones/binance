@@ -1,6 +1,6 @@
 # Kent Invest Crypto Tape Terminal
 
-A unified full-stack BTCUSDT tape terminal with live Binance trade flow, trade-driven charting, and quant strategy workflows.
+A unified full-stack BTCUSDT tape terminal with live Binance trade flow, trade-driven charting, and a live quant paper-trading workspace.
 
 ## Stack
 - Backend: Node.js + Express + Socket.IO + better-sqlite3
@@ -19,8 +19,8 @@ A unified full-stack BTCUSDT tape terminal with live Binance trade flow, trade-d
   - Book ticker snapshots: bid/ask price + qty and timestamp
 - Quant workspace (`/quant`)
   - Upload and validate strategies
-  - Run historical backtests against stored trades
-  - Review performance metrics and results
+  - Run live paper strategies with configurable risk controls
+  - Review real-time position, context, performance, and fill logs
 
 ## Local development
 ```bash

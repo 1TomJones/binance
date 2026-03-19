@@ -1,14 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { quantApi } from '../services/quantApi.js';
-import { deriveBacktestProgress } from '../utils/backtestProgress.js';
-import { buildDefaultBacktestDateRange, rangeIncludesCurrentUtcDay, shouldPollLiveWorkspace } from '../utils/quantWorkspaceMode.js';
 
 const FALLBACK_LIMITS = {
   orderSizeMin: 0.0001,
   orderSizeMax: 0.005,
   orderSizeStep: 0.0001,
-  initialBalance: 10000,
-  maxReplaySpeed: 60
+  initialBalance: 10000
 };
 
 const DEFAULT_SETTINGS = {
@@ -19,34 +16,17 @@ const DEFAULT_SETTINGS = {
   enableShort: true
 };
 
-const DEFAULT_BACKTEST_CONFIG = {
-  startDate: '',
-  endDate: '',
-  includeCurrentDay: false,
-  initialBalance: 10000,
-  ...DEFAULT_SETTINGS
-};
-
 export function QuantWorkspacePage() {
-  const [mode, setMode] = useState('live');
   const [catalog, setCatalog] = useState({ builtIn: [], uploaded: [] });
   const [limits, setLimits] = useState(FALLBACK_LIMITS);
-  const [liveSelection, setLiveSelection] = useState({ kind: 'built_in', key: 'VWAP_CVD_Live_Trend_01' });
-  const [backtestSelection, setBacktestSelection] = useState({ kind: 'built_in', key: 'VWAP_CVD_Live_Trend_01' });
+  const [selection, setSelection] = useState({ kind: 'built_in', key: 'VWAP_CVD_Live_Trend_01' });
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [snapshot, setSnapshot] = useState(null);
-  const [backtestConfig, setBacktestConfig] = useState(DEFAULT_BACKTEST_CONFIG);
-  const [backtestJob, setBacktestJob] = useState(null);
-  const [backtestResult, setBacktestResult] = useState(null);
-  const [analysisView, setAnalysisView] = useState('outcome');
   const [loading, setLoading] = useState(true);
   const [liveBusy, setLiveBusy] = useState(false);
-  const [backtestBusy, setBacktestBusy] = useState(false);
   const [uploadBusy, setUploadBusy] = useState(false);
   const [liveError, setLiveError] = useState('');
-  const [backtestError, setBacktestError] = useState('');
   const [uploadMessage, setUploadMessage] = useState('');
-  const jobPollRef = useRef(null);
 
   useEffect(() => {
     let mounted = true;
@@ -59,19 +39,10 @@ export function QuantWorkspacePage() {
         ]);
         if (!mounted) return;
 
-        const today = new Date();
-        const { defaultStartDate, defaultEndDate } = buildDefaultBacktestDateRange(today);
-
         setCatalog(catalogPayload.strategies || { builtIn: [], uploaded: [] });
         setLimits(catalogPayload.limits || FALLBACK_LIMITS);
         setSnapshot(workspacePayload.snapshot || null);
         setSettings((prev) => ({ ...prev, ...(workspacePayload.snapshot?.controls || {}) }));
-        setBacktestConfig((prev) => ({
-          ...prev,
-          initialBalance: catalogPayload.limits?.initialBalance || FALLBACK_LIMITS.initialBalance,
-          startDate: prev.startDate || defaultStartDate,
-          endDate: prev.endDate || defaultEndDate
-        }));
       } catch (loadError) {
         if (mounted) setLiveError(loadError.message);
       } finally {
@@ -83,12 +54,10 @@ export function QuantWorkspacePage() {
 
     return () => {
       mounted = false;
-      clearInterval(jobPollRef.current);
     };
   }, []);
 
   useEffect(() => {
-    if (!shouldPollLiveWorkspace(mode)) return undefined;
     let active = true;
 
     const poll = setInterval(async () => {
@@ -105,7 +74,7 @@ export function QuantWorkspacePage() {
       active = false;
       clearInterval(poll);
     };
-  }, [mode]);
+  }, []);
 
   const strategyOptions = useMemo(() => {
     const builtIn = (catalog.builtIn || []).map((item) => ({ ...item, kind: 'built_in', value: `built_in:${item.key}` }));
@@ -113,37 +82,21 @@ export function QuantWorkspacePage() {
     return { builtIn, uploaded, all: [...builtIn, ...uploaded] };
   }, [catalog]);
 
-  const liveStrategy = useMemo(() => findStrategy(strategyOptions, liveSelection), [strategyOptions, liveSelection]);
-  const backtestStrategy = useMemo(() => findStrategy(strategyOptions, backtestSelection), [strategyOptions, backtestSelection]);
+  const liveStrategy = useMemo(() => findStrategy(strategyOptions, selection), [strategyOptions, selection]);
 
   const status = snapshot?.status || 'idle';
   const isRunning = status === 'running';
   const effectiveSymbol = snapshot?.symbol || liveStrategy?.symbol || 'BTCUSDT';
   const position = snapshot?.position || buildFlatPosition();
   const performance = snapshot?.performance || buildEmptyPerformance();
-  const progress = deriveBacktestProgress(backtestJob);
-  const backtestTouchesCurrentDay = rangeIncludesCurrentUtcDay(backtestConfig.startDate, backtestConfig.endDate);
 
   const handleNumberChange = (field) => (event) => {
     const value = Number(event.target.value);
     setSettings((prev) => ({ ...prev, [field]: value }));
   };
 
-  const handleBacktestNumberChange = (field) => (event) => {
-    const value = event.target.type === 'checkbox' ? event.target.checked : Number(event.target.value);
-    setBacktestConfig((prev) => ({ ...prev, [field]: value }));
-  };
-
-  const handleBacktestDateChange = (field) => (event) => {
-    setBacktestConfig((prev) => ({ ...prev, [field]: event.target.value }));
-  };
-
   const handleToggleChange = (field) => (event) => {
     setSettings((prev) => ({ ...prev, [field]: event.target.checked }));
-  };
-
-  const handleBacktestToggleChange = (field) => (event) => {
-    setBacktestConfig((prev) => ({ ...prev, [field]: event.target.checked }));
   };
 
   async function refreshCatalogAndSelectUploaded(record) {
@@ -151,9 +104,7 @@ export function QuantWorkspacePage() {
     setCatalog(payload.strategies || { builtIn: [], uploaded: [] });
     setLimits(payload.limits || FALLBACK_LIMITS);
     if (record?.id) {
-      const nextRef = { kind: 'uploaded', id: record.id };
-      setLiveSelection(nextRef);
-      setBacktestSelection(nextRef);
+      setSelection({ kind: 'uploaded', id: record.id });
     }
   }
 
@@ -161,7 +112,6 @@ export function QuantWorkspacePage() {
     if (!file) return;
     setUploadBusy(true);
     setLiveError('');
-    setBacktestError('');
     setUploadMessage('');
     try {
       const content = await file.text();
@@ -181,7 +131,7 @@ export function QuantWorkspacePage() {
     setLiveError('');
     try {
       const payload = await quantApi.startLivePaper({
-        strategyRef: liveSelection,
+        strategyRef: selection,
         runConfig: settings
       });
       setSnapshot(payload.run || null);
@@ -205,279 +155,64 @@ export function QuantWorkspacePage() {
     }
   };
 
-  const startBacktest = async () => {
-    if (!backtestStrategy) return;
-    setBacktestBusy(true);
-    setBacktestError('');
-    setBacktestResult(null);
-    try {
-      const payload = await quantApi.startBacktest({
-        strategyRef: backtestSelection,
-        runConfig: backtestConfig
-      });
-      setBacktestJob(payload.job || { id: payload.jobId });
-      startJobPolling(payload.jobId);
-    } catch (startError) {
-      setBacktestError(startError.message);
-    } finally {
-      setBacktestBusy(false);
-    }
-  };
-
-  const cancelBacktest = async () => {
-    if (!backtestJob?.id) return;
-    setBacktestBusy(true);
-    setBacktestError('');
-    try {
-      await quantApi.cancelBacktest(backtestJob.id);
-      clearInterval(jobPollRef.current);
-      const payload = await quantApi.getBacktestJob(backtestJob.id);
-      setBacktestJob(payload.job || null);
-    } catch (cancelError) {
-      setBacktestError(cancelError.message);
-    } finally {
-      setBacktestBusy(false);
-    }
-  };
-
-  const startJobPolling = (jobId) => {
-    clearInterval(jobPollRef.current);
-
-    const poll = async () => {
-      try {
-        const payload = await quantApi.getBacktestJob(jobId);
-        setBacktestJob(payload.job || null);
-        if (payload.result) {
-          setBacktestResult(payload.result);
-        }
-        if (['completed', 'failed', 'cancelled'].includes(payload.job?.status)) {
-          clearInterval(jobPollRef.current);
-        }
-      } catch (pollError) {
-        setBacktestError(pollError.message);
-        clearInterval(jobPollRef.current);
-      }
-    };
-
-    poll();
-    jobPollRef.current = setInterval(poll, 1200);
-  };
-
   return (
     <main className="quant-shell">
       <header className="quant-hero">
         <div>
           <p className="quant-kicker">Quant</p>
-          <h1>Professional paper execution and historical replay in one workspace.</h1>
+          <h1>Professional paper execution for live market strategy monitoring.</h1>
           <p className="quant-subtitle">
-            Switch clearly between live paper trading and UTC day-by-day backtests without leaving the Quant tab.
+            The Quant tab now focuses entirely on live paper trading, strategy uploads, execution controls, and real-time monitoring.
           </p>
         </div>
         <div className="quant-hero-badges">
           <span className="quant-pill">{effectiveSymbol}</span>
-          <span className={`quant-pill ${mode === 'backtest' ? 'is-accent' : ''}`}>{mode === 'live' ? 'Live Mode' : 'Backtest Mode'}</span>
+          <span className={`quant-pill ${isRunning ? 'is-accent' : ''}`}>{isRunning ? 'Live Running' : 'Live Stopped'}</span>
         </div>
       </header>
 
-      <section className="quant-mode-switcher">
-        <button className={mode === 'live' ? 'is-active' : ''} onClick={() => setMode('live')}>Live</button>
-        <button className={mode === 'backtest' ? 'is-active' : ''} onClick={() => setMode('backtest')}>Backtest</button>
-      </section>
-
-      {(mode === 'live' ? liveError : backtestError) ? <div className="quant-banner quant-banner-error">{mode === 'live' ? liveError : backtestError}</div> : null}
+      {liveError ? <div className="quant-banner quant-banner-error">{liveError}</div> : null}
       {uploadMessage ? <div className="quant-banner">{uploadMessage}</div> : null}
       {loading ? <div className="quant-banner">Loading Quant workspace…</div> : null}
 
-      {mode === 'live' ? (
-        <section className="quant-mode-grid">
-          <div className="quant-stack">
-            <section className="quant-card quant-card-hero">
-              <div className="quant-card-header">
-                <div>
-                  <h3>Live paper strategy</h3>
-                  <span>Clean execution controls with the active strategy source visible at all times.</span>
-                </div>
-                <StatusBadge active={isRunning}>{isRunning ? 'Running' : 'Stopped'}</StatusBadge>
-              </div>
-
-              <StrategySourcePanel
-                title="Strategy source"
-                description="Choose a built-in strategy or drop in a JSON strategy file."
-                options={strategyOptions}
-                selection={liveSelection}
-                onSelectionChange={setLiveSelection}
-                onUpload={handleUpload}
-                busy={uploadBusy || isRunning || liveBusy}
-                activeStrategy={liveStrategy}
-              />
-
-              <div className="quant-control-grid">
-                <Field label="Order size">
-                  <input type="number" min={limits.orderSizeMin} max={limits.orderSizeMax} step={limits.orderSizeStep} value={settings.orderSize} onChange={handleNumberChange('orderSize')} disabled={isRunning || liveBusy} />
-                  <small>{`${limits.orderSizeMin.toFixed(4)} to ${limits.orderSizeMax.toFixed(4)} BTC`}</small>
-                </Field>
-                <Field label="Stop loss %">
-                  <input type="number" min="0.01" max="25" step="0.01" value={settings.stopLossPct} onChange={handleNumberChange('stopLossPct')} disabled={isRunning || liveBusy} />
-                </Field>
-                <Field label="Take profit %">
-                  <input type="number" min="0.01" max="25" step="0.01" value={settings.takeProfitPct} onChange={handleNumberChange('takeProfitPct')} disabled={isRunning || liveBusy} />
-                </Field>
-                <ToggleField label="Enable long trades" checked={settings.enableLong} onChange={handleToggleChange('enableLong')} disabled={isRunning || liveBusy} />
-                <ToggleField label="Enable short trades" checked={settings.enableShort} onChange={handleToggleChange('enableShort')} disabled={isRunning || liveBusy} />
-                <div className="quant-action-row">
-                  <button className="quant-button quant-button-primary" onClick={startStrategy} disabled={isRunning || liveBusy || loading || !liveStrategy}>Start live</button>
-                  <button className="quant-button" onClick={stopStrategy} disabled={!isRunning || liveBusy}>Stop</button>
-                </div>
-              </div>
-            </section>
-
-            <section className="quant-card">
-              <div className="quant-card-header">
-                <div>
-                  <h3>Live strategy chart</h3>
-                  <span>{snapshot?.strategy?.timeframe || liveStrategy?.timeframe || '1m'} · paper execution markers</span>
-                </div>
-              </div>
-              <MiniStrategyChart chart={snapshot?.chart} />
-            </section>
-          </div>
-
-          <div className="quant-stack">
-            <section className="quant-card">
-              <div className="quant-card-header">
-                <div>
-                  <h3>Live position</h3>
-                  <span>{position.state}</span>
-                </div>
-              </div>
-              <MetricGrid items={[
-                ['Position state', position.state],
-                ['Position size', formatQty(position.size)],
-                ['Entry price', formatPrice(position.entryPrice)],
-                ['Current mark', formatPrice(position.currentMarkPrice)],
-                ['Notional exposure', formatMoney(position.notionalExposure)],
-                ['Unrealized PnL', formatMoney(position.unrealizedPnl)],
-                ['Realized PnL', formatMoney(performance.cumulativeRealizedPnl)],
-                ['Total PnL', formatMoney(performance.totalPnl)],
-                ['Last action', snapshot?.lastAction || 'Stopped'],
-                ['Strategy status', snapshot?.strategyStatus || 'Stopped']
-              ]} />
-            </section>
-
-            <section className="quant-card">
-              <div className="quant-card-header">
-                <div>
-                  <h3>Strategy context</h3>
-                  <span>{liveStrategy?.name || snapshot?.strategy?.name || 'Strategy'}</span>
-                </div>
-              </div>
-              <div className="quant-rule-list">
-                <RuleBlock label="Description" value={liveStrategy?.description || snapshot?.strategy?.description || 'Strategy description unavailable.'} />
-                <RuleBlock label="Long entry" value={readRule(liveStrategy?.entryRules?.long || snapshot?.strategy?.entryRules?.long)} />
-                <RuleBlock label="Short entry" value={readRule(liveStrategy?.entryRules?.short || snapshot?.strategy?.entryRules?.short)} />
-                <RuleBlock label="Long exit" value={readRule(liveStrategy?.exitRules?.long || snapshot?.strategy?.exitRules?.long)} />
-                <RuleBlock label="Short exit" value={readRule(liveStrategy?.exitRules?.short || snapshot?.strategy?.exitRules?.short)} />
-              </div>
-            </section>
-
-            <section className="quant-card">
-              <div className="quant-card-header">
-                <div>
-                  <h3>Live performance</h3>
-                  <span>Updates while the strategy runs</span>
-                </div>
-              </div>
-              <MetricGrid items={[
-                ['Total trades', performance.totalTrades],
-                ['Wins', performance.wins],
-                ['Losses', performance.losses],
-                ['Win rate', `${formatNumber(performance.winRate)}%`],
-                ['Best trade', formatMoney(performance.bestTrade)],
-                ['Worst trade', formatMoney(performance.worstTrade)],
-                ['Average trade', formatMoney(performance.averageTrade)],
-                ['Cumulative realized', formatMoney(performance.cumulativeRealizedPnl)],
-                ['Cumulative unrealized', formatMoney(performance.cumulativeUnrealizedPnl)],
-                ['Total return', `${formatNumber(performance.totalReturn)}%`]
-              ]} />
-            </section>
-          </div>
-
-          <section className="quant-card quant-full-width">
-            <div className="quant-card-header">
-              <div>
-                <h3>Live trade log</h3>
-                <span>{snapshot?.tradeLog?.length || 0} recent fills</span>
-              </div>
-            </div>
-            <LiveTradeLogTable rows={snapshot?.tradeLog || []} />
-          </section>
-        </section>
-      ) : (
-        <section className="quant-stack">
+      <section className="quant-mode-grid">
+        <div className="quant-stack">
           <section className="quant-card quant-card-hero">
             <div className="quant-card-header">
               <div>
-                <h3>Backtest workspace</h3>
-                <span>UTC day-by-day historical simulation with session resets at 00:00 UTC.</span>
+                <h3>Live paper strategy</h3>
+                <span>Clean execution controls with the active strategy source visible at all times.</span>
               </div>
-              <StatusBadge active={backtestJob?.status === 'running'}>
-                {humanizeStatus(backtestJob?.status || 'ready')}
-              </StatusBadge>
+              <StatusBadge active={isRunning}>{isRunning ? 'Running' : 'Stopped'}</StatusBadge>
             </div>
 
-            <div className="quant-form-grid">
-              <StrategySourcePanel
-                title="Strategy source"
-                description="Use the built-in strategy instantly or upload a JSON strategy for backtesting."
-                options={strategyOptions}
-                selection={backtestSelection}
-                onSelectionChange={setBacktestSelection}
-                onUpload={handleUpload}
-                busy={uploadBusy || backtestBusy || backtestJob?.status === 'running'}
-                activeStrategy={backtestStrategy}
-              />
+            <StrategySourcePanel
+              title="Strategy source"
+              description="Choose a built-in strategy or drop in a JSON strategy file."
+              options={strategyOptions}
+              selection={selection}
+              onSelectionChange={setSelection}
+              onUpload={handleUpload}
+              busy={uploadBusy || isRunning || liveBusy}
+              activeStrategy={liveStrategy}
+            />
 
-              <div className="quant-backtest-controls">
-                <Field label="Start date">
-                  <input type="date" value={backtestConfig.startDate} onChange={handleBacktestDateChange('startDate')} max={backtestConfig.endDate || undefined} />
-                  <small>Every day starts from 00:00 UTC.</small>
-                </Field>
-                <Field label="End date">
-                  <input type="date" value={backtestConfig.endDate} onChange={handleBacktestDateChange('endDate')} min={backtestConfig.startDate || undefined} />
-                  <small>Open positions flatten at end of each UTC day.</small>
-                </Field>
-                <ToggleField label="Include current UTC day (slower)" checked={backtestConfig.includeCurrentDay} onChange={handleBacktestToggleChange('includeCurrentDay')} />
-                <Field label="Order size">
-                  <input type="number" min={limits.orderSizeMin} max={limits.orderSizeMax} step={limits.orderSizeStep} value={backtestConfig.orderSize} onChange={handleBacktestNumberChange('orderSize')} />
-                  <small>{`${limits.orderSizeMin.toFixed(4)} to ${limits.orderSizeMax.toFixed(4)} BTC`}</small>
-                </Field>
-                <Field label="Initial balance">
-                  <input type="number" min="100" step="100" value={backtestConfig.initialBalance} onChange={handleBacktestNumberChange('initialBalance')} />
-                </Field>
-                <div className="quant-note-card">
-                  <strong>Replay model</strong>
-                  <span>Historical coverage is prepared first, then replay runs entirely from local SQLite/cache in chronological order using the same paper execution rules as live mode.</span>
-                </div>
-                {backtestTouchesCurrentDay ? (
-                  <div className="quant-note-card">
-                    <strong>Current UTC day in range</strong>
-                    <span>{backtestConfig.includeCurrentDay
-                      ? 'This run includes the current UTC day, so coverage will use the slower dedicated tail-hydration path before replay starts.'
-                      : 'This range touches the current UTC day. Enable “Include current UTC day (slower)” or choose an end date before today to stay on completed-day coverage only.'}</span>
-                  </div>
-                ) : null}
-                <Field label="Stop loss %">
-                  <input type="number" min="0.01" max="25" step="0.01" value={backtestConfig.stopLossPct} onChange={handleBacktestNumberChange('stopLossPct')} />
-                </Field>
-                <Field label="Take profit %">
-                  <input type="number" min="0.01" max="25" step="0.01" value={backtestConfig.takeProfitPct} onChange={handleBacktestNumberChange('takeProfitPct')} />
-                </Field>
-                <ToggleField label="Longs enabled" checked={backtestConfig.enableLong} onChange={handleBacktestToggleChange('enableLong')} />
-                <ToggleField label="Shorts enabled" checked={backtestConfig.enableShort} onChange={handleBacktestToggleChange('enableShort')} />
-                <div className="quant-action-row">
-                  <button className="quant-button quant-button-primary" onClick={startBacktest} disabled={backtestBusy || !backtestStrategy || !backtestConfig.startDate || !backtestConfig.endDate}>Start backtest</button>
-                  <button className="quant-button" onClick={cancelBacktest} disabled={backtestJob?.status !== 'running' || backtestBusy}>Stop</button>
-                </div>
+            <div className="quant-control-grid">
+              <Field label="Order size">
+                <input type="number" min={limits.orderSizeMin} max={limits.orderSizeMax} step={limits.orderSizeStep} value={settings.orderSize} onChange={handleNumberChange('orderSize')} disabled={isRunning || liveBusy} />
+                <small>{`${limits.orderSizeMin.toFixed(4)} to ${limits.orderSizeMax.toFixed(4)} BTC`}</small>
+              </Field>
+              <Field label="Stop loss %">
+                <input type="number" min="0.01" max="25" step="0.01" value={settings.stopLossPct} onChange={handleNumberChange('stopLossPct')} disabled={isRunning || liveBusy} />
+              </Field>
+              <Field label="Take profit %">
+                <input type="number" min="0.01" max="25" step="0.01" value={settings.takeProfitPct} onChange={handleNumberChange('takeProfitPct')} disabled={isRunning || liveBusy} />
+              </Field>
+              <ToggleField label="Enable long trades" checked={settings.enableLong} onChange={handleToggleChange('enableLong')} disabled={isRunning || liveBusy} />
+              <ToggleField label="Enable short trades" checked={settings.enableShort} onChange={handleToggleChange('enableShort')} disabled={isRunning || liveBusy} />
+              <div className="quant-action-row">
+                <button className="quant-button quant-button-primary" onClick={startStrategy} disabled={isRunning || liveBusy || loading || !liveStrategy}>Start live</button>
+                <button className="quant-button" onClick={stopStrategy} disabled={!isRunning || liveBusy}>Stop</button>
               </div>
             </div>
           </section>
@@ -485,77 +220,84 @@ export function QuantWorkspacePage() {
           <section className="quant-card">
             <div className="quant-card-header">
               <div>
-                <h3>Backtest progress</h3>
-                <span>The UI remains responsive while the replay runs.</span>
+                <h3>Live strategy chart</h3>
+                <span>{snapshot?.strategy?.timeframe || liveStrategy?.timeframe || '1m'} · paper execution markers</span>
               </div>
             </div>
-            <ProgressPanel progress={progress} />
+            <MiniStrategyChart chart={snapshot?.chart} />
+          </section>
+        </div>
+
+        <div className="quant-stack">
+          <section className="quant-card">
+            <div className="quant-card-header">
+              <div>
+                <h3>Live position</h3>
+                <span>{position.state}</span>
+              </div>
+            </div>
+            <MetricGrid items={[
+              ['Position state', position.state],
+              ['Position size', formatQty(position.size)],
+              ['Entry price', formatPrice(position.entryPrice)],
+              ['Current mark', formatPrice(position.currentMarkPrice)],
+              ['Notional exposure', formatMoney(position.notionalExposure)],
+              ['Unrealized PnL', formatMoney(position.unrealizedPnl)],
+              ['Realized PnL', formatMoney(performance.cumulativeRealizedPnl)],
+              ['Total PnL', formatMoney(performance.totalPnl)],
+              ['Last action', snapshot?.lastAction || 'Stopped'],
+              ['Strategy status', snapshot?.strategyStatus || 'Stopped']
+            ]} />
           </section>
 
-          {backtestResult ? (
-            <>
-              <section className="quant-card">
-                <div className="quant-card-header">
-                  <div>
-                    <h3>Main PnL chart</h3>
-                    <span>Cumulative realized PnL after every closed trade</span>
-                  </div>
-                </div>
-                <PnlLineChart points={backtestResult.series?.cumulativePnlSeries || []} />
-              </section>
+          <section className="quant-card">
+            <div className="quant-card-header">
+              <div>
+                <h3>Strategy context</h3>
+                <span>{liveStrategy?.name || snapshot?.strategy?.name || 'Strategy'}</span>
+              </div>
+            </div>
+            <div className="quant-rule-list">
+              <RuleBlock label="Description" value={liveStrategy?.description || snapshot?.strategy?.description || 'Strategy description unavailable.'} />
+              <RuleBlock label="Long entry" value={readRule(liveStrategy?.entryRules?.long || snapshot?.strategy?.entryRules?.long)} />
+              <RuleBlock label="Short entry" value={readRule(liveStrategy?.entryRules?.short || snapshot?.strategy?.entryRules?.short)} />
+              <RuleBlock label="Long exit" value={readRule(liveStrategy?.exitRules?.long || snapshot?.strategy?.exitRules?.long)} />
+              <RuleBlock label="Short exit" value={readRule(liveStrategy?.exitRules?.short || snapshot?.strategy?.exitRules?.short)} />
+            </div>
+          </section>
 
-              <section className="quant-results-grid">
-                <section className="quant-card">
-                  <div className="quant-card-header">
-                    <div>
-                      <h3>Backtest metrics</h3>
-                      <span>Core strategy analytics</span>
-                    </div>
-                  </div>
-                  <MetricGrid items={buildBacktestMetrics(backtestResult.summary)} />
-                </section>
+          <section className="quant-card">
+            <div className="quant-card-header">
+              <div>
+                <h3>Live performance</h3>
+                <span>Updates while the strategy runs</span>
+              </div>
+            </div>
+            <MetricGrid items={[
+              ['Total trades', performance.totalTrades],
+              ['Wins', performance.wins],
+              ['Losses', performance.losses],
+              ['Win rate', `${formatNumber(performance.winRate)}%`],
+              ['Best trade', formatMoney(performance.bestTrade)],
+              ['Worst trade', formatMoney(performance.worstTrade)],
+              ['Average trade', formatMoney(performance.averageTrade)],
+              ['Cumulative realized', formatMoney(performance.cumulativeRealizedPnl)],
+              ['Cumulative unrealized', formatMoney(performance.cumulativeUnrealizedPnl)],
+              ['Total return', `${formatNumber(performance.totalReturn)}%`]
+            ]} />
+          </section>
+        </div>
 
-                <section className="quant-card">
-                  <div className="quant-card-header">
-                    <div>
-                      <h3>Analysis views</h3>
-                      <span>Interactive slices of the completed run</span>
-                    </div>
-                    <select className="quant-inline-select" value={analysisView} onChange={(event) => setAnalysisView(event.target.value)}>
-                      <option value="outcome">Outcome mix</option>
-                      <option value="timeOfDay">Time of day</option>
-                      <option value="duration">Trade duration</option>
-                      <option value="exitReasons">Exit reasons</option>
-                      <option value="sessions">Session results</option>
-                    </select>
-                  </div>
-                  <AnalysisPanel view={analysisView} analyses={backtestResult.summary?.analyses || {}} summary={backtestResult.summary || {}} />
-                </section>
-              </section>
-
-              <section className="quant-card">
-                <div className="quant-card-header">
-                  <div>
-                    <h3>Session results</h3>
-                    <span>Daily UTC session resets with cumulative analytics preserved</span>
-                  </div>
-                </div>
-                <SessionResultsTable rows={backtestResult.summary?.sessionResults || []} />
-              </section>
-
-              <section className="quant-card">
-                <div className="quant-card-header">
-                  <div>
-                    <h3>Trade log</h3>
-                    <span>{backtestResult.tradeLog?.length || 0} completed trades</span>
-                  </div>
-                </div>
-                <BacktestTradeTable rows={backtestResult.tradeLog || []} />
-              </section>
-            </>
-          ) : null}
+        <section className="quant-card quant-full-width">
+          <div className="quant-card-header">
+            <div>
+              <h3>Live trade log</h3>
+              <span>{snapshot?.tradeLog?.length || 0} recent fills</span>
+            </div>
+          </div>
+          <LiveTradeLogTable rows={snapshot?.tradeLog || []} />
         </section>
-      )}
+      </section>
     </main>
   );
 }
@@ -598,7 +340,7 @@ function StrategySourcePanel({ title, description, options, selection, onSelecti
       </div>
       <div className={`quant-dropzone ${busy ? 'is-disabled' : ''}`} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop} onClick={() => !busy && inputRef.current?.click()} role="button" tabIndex={0}>
         <strong>Drag and drop a JSON strategy here</strong>
-        <span>Or click to browse. Uploaded strategies become selectable in both Live and Backtest modes.</span>
+        <span>Or click to browse. Uploaded strategies become selectable for live paper execution immediately.</span>
       </div>
       <input ref={inputRef} className="quant-hidden-input" type="file" accept=".json,application/json" onChange={(event) => onUpload(event.target.files?.[0])} />
       {activeStrategy ? (
@@ -608,217 +350,6 @@ function StrategySourcePanel({ title, description, options, selection, onSelecti
           <span>{activeStrategy.timeframe}</span>
         </div>
       ) : null}
-    </div>
-  );
-}
-
-function ProgressPanel({ progress }) {
-  const pct = Math.max(0, Math.min(100, progress.percent || 0));
-  const coverage = progress.coverage || {};
-  const hydration = progress.hydration || {};
-  const replay = progress.replay || {};
-  const hydrationRetry = hydration.retry || null;
-  return (
-    <div className="quant-progress-panel">
-      <div
-        className="quant-progress-track"
-        role="progressbar"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={Math.round(pct)}
-        aria-label={progress.progressLabel || `Backtest progress ${formatNumber(pct)}%`}
-      >
-        <div className="quant-progress-fill" style={{ width: `${pct}%` }} />
-      </div>
-      <div className="quant-note-card">
-        <strong>{progress.primaryLabel || 'Waiting to start'}</strong>
-        <span>{progress.secondaryLabel || progress.marker || 'Waiting to start'}</span>
-      </div>
-      <div className="quant-progress-grid">
-        <MetricCard label="Primary state" value={progress.primaryLabel || 'Waiting to start'} />
-        <MetricCard label="Status" value={progress.status} />
-        <MetricCard label="Current session" value={progress.currentDayLabel} />
-        <MetricCard label="Current UTC date" value={progress.currentDate} />
-        <MetricCard label="Overall progress" value={progress.progressLabel || `${formatNumber(pct)}%`} />
-        <MetricCard label="Elapsed" value={formatDuration(progress.elapsedMs)} />
-        <MetricCard label="ETA" value={progress.etaMs == null ? '—' : formatDuration(progress.etaMs)} />
-        <MetricCard label="Closed trades" value={progress.totalTrades} />
-        <MetricCard label="Active stage" value={progress.marker} />
-      </div>
-      <div className="quant-progress-grid">
-        <MetricCard label="Days ready" value={formatCoverageReadyLabel(coverage)} />
-        <MetricCard label="Waiting on coverage" value={coverage.waitingOnCoverage ? 'Yes' : 'No'} />
-        <MetricCard label="Hydrating day" value={coverage.hydratingDay || '—'} />
-        <MetricCard label="Current-day tail" value={coverage.currentUtcDaySlowPath ? 'Included' : 'Completed days only'} />
-        <MetricCard label="Hydration source" value={humanizeHydrationSource(hydration.source)} />
-        <MetricCard label="Hydration status" value={humanizeHydrationStatus(hydration.status)} />
-        <MetricCard label="Rows ingested" value={hydration.rowsIngested ?? '—'} />
-        <MetricCard label="REST pages" value={hydration.pagesIngested ?? '—'} />
-        <MetricCard label="Replay trades" value={formatReplayTradeProgress(replay)} />
-        <MetricCard label="Replay status" value={humanizeHydrationStatus(replay.status)} />
-      </div>
-      {coverage.requestedCurrentUtcDay ? (
-        <div className="quant-note-card">
-          <strong>Current UTC day handling</strong>
-          <span>{coverage.currentUtcDaySlowPath
-            ? 'Current UTC day is included, so replay is waiting for the slower dedicated tail-hydration path before local replay begins.'
-            : 'Completed UTC days only. The current UTC day is excluded from this run unless explicitly enabled.'}</span>
-        </div>
-      ) : null}
-      {coverage.waitingOnCoverage ? (
-        <div className="quant-note-card">
-          <strong>Coverage state</strong>
-          <span>{coverage.hydratingDay
-            ? `Replay is waiting for historical coverage to finish for ${coverage.hydratingDay}.`
-            : 'Replay is waiting for the historical coverage plan to finish.'}</span>
-        </div>
-      ) : null}
-      {hydrationRetry ? (
-        <div className="quant-note-card">
-          <strong>Hydration retry/backoff</strong>
-          <span>{`Attempt ${hydrationRetry.attempt} waiting ${formatDuration(hydrationRetry.retryInMs || 0)} — ${hydrationRetry.message}`}</span>
-        </div>
-      ) : null}
-      {(hydration.source || hydration.status || hydration.rowsIngested || hydration.lastAggTradeId) ? (
-        <div className="quant-note-card">
-          <strong>Hydration checkpoint</strong>
-          <span>{buildHydrationCheckpointLabel(hydration)}</span>
-        </div>
-      ) : null}
-      {replay.totalTrades ? (
-        <div className="quant-note-card">
-          <strong>Replay progress</strong>
-          <span>{`Replaying ${replay.replayedTrades || 0} / ${replay.totalTrades || 0} source trades in chronological order with progressive VWAP/CVD updates.`}</span>
-        </div>
-      ) : null}
-      {progress.phase ? (
-        <div className="quant-note-card">
-          <strong>Current phase</strong>
-          <span>{humanizeHydrationStatus(progress.phase)}</span>
-        </div>
-      ) : null}
-      {progress.status === 'Running' ? (
-        <div className="quant-note-card">
-          <strong>Render-safe execution</strong>
-          <span>The replay yields back to the event loop in small slices so the live paper engine and API routes stay responsive while the backtest is running.</span>
-        </div>
-      ) : null}
-      {progress.errorMessage ? (
-        <div className="quant-note-card">
-          <strong>Failure reason</strong>
-          <span>{progress.errorMessage}</span>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function AnalysisPanel({ view, analyses, summary }) {
-  if (view === 'outcome') {
-    return <OutcomeChart outcome={analyses.outcome || { winning: 0, losing: 0, breakeven: 0 }} />;
-  }
-  if (view === 'timeOfDay') {
-    return <BarChart rows={analyses.timeOfDay || []} dataKey="winRate" labelKey="label" title="Average win rate by UTC hour" suffix="%" />;
-  }
-  if (view === 'duration') {
-    return (
-      <div className="quant-analysis-stack">
-        <MetricGrid items={[
-          ['Average duration', `${formatNumber(summary.averageTradeDurationMinutes)} min`],
-          ['Median duration', `${formatNumber(summary.medianTradeDurationMinutes)} min`]
-        ]} />
-        <BarChart rows={analyses.durationBuckets || []} dataKey="count" labelKey="key" title="Trade duration distribution" />
-      </div>
-    );
-  }
-  if (view === 'sessions') {
-    return <BarChart rows={analyses.sessions || []} dataKey="realizedPnl" labelKey="date" title="Session realized PnL by UTC day" />;
-  }
-  return <BarChart rows={analyses.exitReasons || []} dataKey="count" labelKey="reason" title="Exit reason count" />;
-}
-
-function OutcomeChart({ outcome }) {
-  const total = Math.max((outcome.winning || 0) + (outcome.losing || 0) + (outcome.breakeven || 0), 1);
-  const winning = (outcome.winning || 0) / total * 100;
-  const losing = (outcome.losing || 0) / total * 100;
-  const breakeven = (outcome.breakeven || 0) / total * 100;
-  const style = {
-    background: `conic-gradient(#47c28f 0 ${winning}%, #e16a74 ${winning}% ${winning + losing}%, #7d8fab ${winning + losing}% 100%)`
-  };
-
-  return (
-    <div className="quant-outcome-wrap">
-      <div className="quant-outcome-donut" style={style}><div /></div>
-      <div className="quant-outcome-legend">
-        <LegendRow color="#47c28f" label="Winning trades" value={outcome.winning || 0} />
-        <LegendRow color="#e16a74" label="Losing trades" value={outcome.losing || 0} />
-        <LegendRow color="#7d8fab" label="Breakeven trades" value={outcome.breakeven || 0} />
-      </div>
-    </div>
-  );
-}
-
-function BarChart({ rows, dataKey, labelKey, title, suffix = '' }) {
-  if (!rows.length) {
-    return <p className="quant-empty">No data available for this analysis yet.</p>;
-  }
-
-  const maxMagnitude = Math.max(...rows.map((row) => Math.abs(Number(row[dataKey] || 0))), 1);
-  return (
-    <div className="quant-bar-chart">
-      <p className="quant-chart-title">{title}</p>
-      {rows.map((row) => {
-        const value = Number(row[dataKey] || 0);
-        return (
-          <div key={row[labelKey]} className="quant-bar-row">
-            <span>{row[labelKey]}</span>
-            <div className="quant-bar-track">
-              <div
-                className={`quant-bar-fill ${value < 0 ? 'is-negative' : ''}`}
-                style={{ width: `${(Math.abs(value) / maxMagnitude) * 100}%` }}
-              />
-            </div>
-            <strong>{formatNumber(value)}{suffix}</strong>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function PnlLineChart({ points }) {
-  if (!points.length) {
-    return <p className="quant-empty">Run a completed backtest to render the cumulative realized PnL curve.</p>;
-  }
-
-  const width = 980;
-  const height = 320;
-  const padding = { top: 20, right: 20, bottom: 28, left: 56 };
-  const values = points.map((point) => Number(point.cumulativeRealizedPnl || 0));
-  const min = Math.min(...values, 0);
-  const max = Math.max(...values, 0);
-  const range = Math.max(max - min, 1);
-  const xForIndex = (index) => padding.left + (index / Math.max(points.length - 1, 1)) * (width - padding.left - padding.right);
-  const yForValue = (value) => padding.top + ((max - value) / range) * (height - padding.top - padding.bottom);
-  const path = points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${xForIndex(index)} ${yForValue(point.cumulativeRealizedPnl)}`).join(' ');
-
-  return (
-    <div className="quant-mini-chart">
-      <svg viewBox={`0 0 ${width} ${height}`} className="quant-chart-svg" role="img" aria-label="Cumulative realized PnL chart">
-        <rect width={width} height={height} fill="#07101c" />
-        <line x1={padding.left} y1={padding.top} x2={padding.left} y2={height - padding.bottom} stroke="#17243a" />
-        <line x1={padding.left} y1={height - padding.bottom} x2={width - padding.right} y2={height - padding.bottom} stroke="#17243a" />
-        {[min, (min + max) / 2, max].map((value) => (
-          <g key={value}>
-            <line x1={padding.left} y1={yForValue(value)} x2={width - padding.right} y2={yForValue(value)} stroke="#111d31" strokeDasharray="4 6" />
-            <text x={8} y={yForValue(value) + 4} fill="#6f84aa" fontSize="11">{formatMoney(value)}</text>
-          </g>
-        ))}
-        <path d={path} fill="none" stroke="#7eb2ff" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
-        {points.map((point, index) => (
-          <circle key={`${point.index}-${point.time}`} cx={xForIndex(index)} cy={yForValue(point.cumulativeRealizedPnl)} r="3" fill={point.cumulativeRealizedPnl >= 0 ? '#47c28f' : '#e16a74'} />
-        ))}
-      </svg>
     </div>
   );
 }
@@ -862,88 +393,6 @@ function LiveTradeLogTable({ rows }) {
   );
 }
 
-function SessionResultsTable({ rows }) {
-  if (!rows.length) {
-    return <p className="quant-empty">Session-level results will appear once at least one UTC day has been replayed.</p>;
-  }
-
-  return (
-    <div className="quant-table-wrap">
-      <table className="quant-table">
-        <thead>
-          <tr>
-            <th>Date</th>
-            <th>Trades</th>
-            <th>Wins</th>
-            <th>Losses</th>
-            <th>Breakeven</th>
-            <th>Realized PnL</th>
-            <th>Average trade</th>
-            <th>Average duration</th>
-            <th>Session close</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.date}>
-              <td>{row.date}</td>
-              <td>{row.tradeCount}</td>
-              <td>{row.wins}</td>
-              <td>{row.losses}</td>
-              <td>{row.breakeven}</td>
-              <td>{formatMoney(row.realizedPnl)}</td>
-              <td>{formatMoney(row.averageTradePnl)}</td>
-              <td>{formatNumber(row.averageDurationMinutes)} min</td>
-              <td>{row.endOfDayExit ? humanizeExitReason(row.endOfDayExit) : 'Flat'}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function BacktestTradeTable({ rows }) {
-  if (!rows.length) {
-    return <p className="quant-empty">Completed trades will appear here once the replay finishes.</p>;
-  }
-
-  return (
-    <div className="quant-table-wrap quant-table-wrap-tall">
-      <table className="quant-table">
-        <thead>
-          <tr>
-            <th>Entry time</th>
-            <th>Exit time</th>
-            <th>Side</th>
-            <th>Size</th>
-            <th>Entry price</th>
-            <th>Exit price</th>
-            <th>Realized PnL</th>
-            <th>Duration</th>
-            <th>Exit reason</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, index) => (
-            <tr key={`${row.entryTime}-${row.exitTime}-${index}`}>
-              <td>{formatTimestamp(row.entryTime)}</td>
-              <td>{formatTimestamp(row.exitTime)}</td>
-              <td>{row.side?.toUpperCase()}</td>
-              <td>{formatQty(row.quantity)}</td>
-              <td>{formatPrice(row.entryPrice)}</td>
-              <td>{formatPrice(row.exitPrice)}</td>
-              <td>{formatMoney(row.realizedPnl)}</td>
-              <td>{formatDuration(row.durationMs)}</td>
-              <td>{humanizeExitReason(row.exitReason)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
 function MetricGrid({ items }) {
   return (
     <div className="quant-metric-grid">
@@ -953,15 +402,6 @@ function MetricGrid({ items }) {
           <strong>{String(value ?? '—')}</strong>
         </div>
       ))}
-    </div>
-  );
-}
-
-function MetricCard({ label, value }) {
-  return (
-    <div className="quant-metric-cell">
-      <label>{label}</label>
-      <strong>{String(value ?? '—')}</strong>
     </div>
   );
 }
@@ -995,10 +435,6 @@ function RuleBlock({ label, value }) {
 
 function StatusBadge({ active, children }) {
   return <span className={`quant-status-badge ${active ? 'is-positive' : ''}`}>{children}</span>;
-}
-
-function LegendRow({ color, label, value }) {
-  return <div className="quant-legend-row"><i style={{ background: color }} /> <span>{label}</span><strong>{value}</strong></div>;
 }
 
 function MiniStrategyChart({ chart }) {
@@ -1081,28 +517,6 @@ function findStrategy(strategyOptions, selection) {
   )) || strategyOptions.all[0] || null;
 }
 
-function buildBacktestMetrics(summary = {}) {
-  const sessionResults = summary.sessionResults || [];
-  const positiveSessions = sessionResults.filter((row) => Number(row.realizedPnl || 0) > 0).length;
-  return [
-    ['Total trades', summary.totalTrades || 0],
-    ['Wins', summary.wins || 0],
-    ['Losses', summary.losses || 0],
-    ['Win rate', `${formatNumber(summary.winRate)}%`],
-    ['Backtest days', sessionResults.length],
-    ['Winning days', positiveSessions],
-    ['Cumulative realized PnL', formatMoney(summary.cumulativeRealizedPnl)],
-    ['Average trade PnL', formatMoney(summary.averageTradePnl)],
-    ['Best trade', formatMoney(summary.bestTrade)],
-    ['Worst trade', formatMoney(summary.worstTrade)],
-    ['Average duration', `${formatNumber(summary.averageTradeDurationMinutes)} min`],
-    ['Median duration', `${formatNumber(summary.medianTradeDurationMinutes)} min`],
-    ['Max drawdown', `${formatNumber(summary.maxDrawdown)}%`],
-    ['Profit factor', formatNumber(summary.profitFactor)],
-    ['Expectancy', formatMoney(summary.expectancy)]
-  ];
-}
-
 function buildEmptyPerformance() {
   return {
     totalTrades: 0,
@@ -1147,50 +561,9 @@ function humanizeExitReason(value) {
   return labels[value] || value || '—';
 }
 
-function humanizeStatus(value) {
-  const map = {
-    idle: 'Idle',
-    ready: 'Ready',
-    queued: 'Queued',
-    running: 'Running',
-    completed: 'Completed',
-    failed: 'Failed',
-    cancelled: 'Cancelled'
-  };
-  return map[value] || value || 'Ready';
-}
-
-function humanizeHydrationSource(value) {
-  if (!value) return '—';
-  const map = {
-    'bulk-file': 'Bulk daily ZIP',
-    'binance-rest': 'Binance REST',
-    'binance-rest-fallback': 'REST fallback',
-    'sqlite-reconciled': 'SQLite resume',
-    'current-day-tail': 'Current-day tail'
-  };
-  return map[value] || value;
-}
-
-function humanizeHydrationStatus(value) {
-  if (!value) return '—';
-  return String(value)
-    .replace(/[_-]+/g, ' ')
-    .replace(/\b\w/g, (char) => char.toUpperCase());
-}
-
-
-function toDateInput(date) {
-  return new Date(date).toISOString().slice(0, 10);
-}
-
 function formatTimestamp(value) {
   if (!value) return '—';
   return new Date(value).toLocaleString(undefined, { hour12: false });
-}
-
-function formatOptionalTimestamp(value) {
-  return value ? formatTimestamp(value) : '—';
 }
 
 function formatPrice(value) {
@@ -1212,36 +585,4 @@ function formatQty(value) {
 function formatNumber(value) {
   if (value == null || Number.isNaN(Number(value))) return '0.00';
   return Number(value).toFixed(2);
-}
-
-function formatPercentOrDash(value) {
-  return Number.isFinite(Number(value)) ? `${formatNumber(value)}%` : '—';
-}
-
-function formatReplayTradeProgress(replay) {
-  if (!Number.isFinite(Number(replay?.totalTrades))) return '—';
-  return `${replay?.replayedTrades || 0} / ${replay?.totalTrades || 0}`;
-}
-
-function formatCoverageReadyLabel(coverage) {
-  if (!Number.isFinite(Number(coverage?.totalDays))) return '—';
-  return `${coverage?.readyDays || 0} / ${coverage?.totalDays || 0}`;
-}
-
-function buildHydrationCheckpointLabel(hydration) {
-  return `${humanizeHydrationSource(hydration.source)} checkpointed ${hydration.rowsIngested ?? 0} rows across ${hydration.pagesIngested ?? 0} page(s) through ${formatOptionalTimestamp(hydration.checkpointTimeMs)} / trade ${hydration.lastAggTradeId ?? '—'}.`;
-}
-
-function formatDuration(value) {
-  const ms = Number(value || 0);
-  if (!ms) return '0s';
-  const totalSeconds = Math.max(Math.floor(ms / 1000), 0);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  if (minutes >= 60) {
-    const hours = Math.floor(minutes / 60);
-    return `${hours}h ${minutes % 60}m`;
-  }
-  if (minutes > 0) return `${minutes}m ${seconds}s`;
-  return `${seconds}s`;
 }

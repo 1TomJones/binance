@@ -1,9 +1,9 @@
-import { PAPER_EXECUTION_LIMITS, StrategyExecutionEngine } from './strategyExecutionEngine.js';
+import { LIVE_EXECUTION_LIMITS, StrategyExecutionEngine } from './strategyExecutionEngine.js';
 
 const MAX_CANDLE_WINDOW = 120;
 const MAX_TRADE_LOG = 200;
 
-export const LIVE_PAPER_LIMITS = PAPER_EXECUTION_LIMITS;
+export const LIVE_PAPER_LIMITS = LIVE_EXECUTION_LIMITS;
 
 export class LivePaperRunner {
   constructor({ getMarketSnapshot, saveLiveState, getLiveState, strategyResolver, executionEngine = new StrategyExecutionEngine() }) {
