@@ -592,6 +592,9 @@ function StrategySourcePanel({ title, description, options, selection, onSelecti
 
 function ProgressPanel({ progress }) {
   const pct = Math.max(0, Math.min(100, progress.percent || 0));
+  const hydration = progress.hydration || {};
+  const replay = progress.replay || {};
+  const hydrationRetry = hydration.retry || null;
   return (
     <div className="quant-progress-panel">
       <div className="quant-progress-track">
@@ -601,11 +604,47 @@ function ProgressPanel({ progress }) {
         <MetricCard label="Status" value={progress.status} />
         <MetricCard label="Current session" value={progress.currentDayLabel} />
         <MetricCard label="Current UTC date" value={progress.currentDate} />
-        <MetricCard label="Percent complete" value={`${formatNumber(pct)}%`} />
+        <MetricCard label="Overall progress" value={`${formatNumber(pct)}%`} />
         <MetricCard label="Elapsed" value={formatDuration(progress.elapsedMs)} />
         <MetricCard label="Closed trades" value={progress.totalTrades} />
-        <MetricCard label="Replay stage" value={progress.marker} />
+        <MetricCard label="Active stage" value={progress.marker} />
       </div>
+      <div className="quant-progress-grid">
+        <MetricCard label="Hydration source" value={humanizeHydrationSource(hydration.source)} />
+        <MetricCard label="Hydration status" value={humanizeHydrationStatus(hydration.status)} />
+        <MetricCard label="Rows ingested" value={hydration.rowsIngested ?? '—'} />
+        <MetricCard label="REST pages" value={hydration.pagesIngested ?? '—'} />
+        <MetricCard label="Checkpoint time" value={formatOptionalTimestamp(hydration.checkpointTimeMs)} />
+        <MetricCard label="Checkpoint trade id" value={hydration.lastAggTradeId ?? '—'} />
+        <MetricCard label="Hydration %" value={formatPercentOrDash(hydration.percent)} />
+        <MetricCard label="Replay trades" value={formatReplayTradeProgress(replay)} />
+        <MetricCard label="Replay status" value={humanizeHydrationStatus(replay.status)} />
+        <MetricCard label="Replay %" value={formatPercentOrDash(replay.percent)} />
+      </div>
+      {hydrationRetry ? (
+        <div className="quant-note-card">
+          <strong>Hydration retry/backoff</strong>
+          <span>{`Attempt ${hydrationRetry.attempt} waiting ${formatDuration(hydrationRetry.retryInMs || 0)} — ${hydrationRetry.message}`}</span>
+        </div>
+      ) : null}
+      {(hydration.source || hydration.status || hydration.rowsIngested || hydration.lastAggTradeId) ? (
+        <div className="quant-note-card">
+          <strong>Hydration checkpoint</strong>
+          <span>{buildHydrationCheckpointLabel(hydration)}</span>
+        </div>
+      ) : null}
+      {replay.totalTrades ? (
+        <div className="quant-note-card">
+          <strong>Replay progress</strong>
+          <span>{`Replaying ${replay.replayedTrades || 0} / ${replay.totalTrades || 0} source trades in chronological order with progressive VWAP/CVD updates.`}</span>
+        </div>
+      ) : null}
+      {progress.phase ? (
+        <div className="quant-note-card">
+          <strong>Current phase</strong>
+          <span>{humanizeHydrationStatus(progress.phase)}</span>
+        </div>
+      ) : null}
       {progress.errorMessage ? (
         <div className="quant-note-card">
           <strong>Failure reason</strong>
@@ -1063,6 +1102,24 @@ function humanizeStatus(value) {
   return map[value] || value || 'Ready';
 }
 
+function humanizeHydrationSource(value) {
+  if (!value) return '—';
+  const map = {
+    'bulk-file': 'Bulk daily ZIP',
+    'binance-rest': 'Binance REST',
+    'binance-rest-fallback': 'REST fallback',
+    'sqlite-reconciled': 'SQLite resume'
+  };
+  return map[value] || value;
+}
+
+function humanizeHydrationStatus(value) {
+  if (!value) return '—';
+  return String(value)
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
 
 function toDateInput(date) {
   return new Date(date).toISOString().slice(0, 10);
@@ -1071,6 +1128,10 @@ function toDateInput(date) {
 function formatTimestamp(value) {
   if (!value) return '—';
   return new Date(value).toLocaleString(undefined, { hour12: false });
+}
+
+function formatOptionalTimestamp(value) {
+  return value ? formatTimestamp(value) : '—';
 }
 
 function formatPrice(value) {
@@ -1092,6 +1153,19 @@ function formatQty(value) {
 function formatNumber(value) {
   if (value == null || Number.isNaN(Number(value))) return '0.00';
   return Number(value).toFixed(2);
+}
+
+function formatPercentOrDash(value) {
+  return Number.isFinite(Number(value)) ? `${formatNumber(value)}%` : '—';
+}
+
+function formatReplayTradeProgress(replay) {
+  if (!Number.isFinite(Number(replay?.totalTrades))) return '—';
+  return `${replay?.replayedTrades || 0} / ${replay?.totalTrades || 0}`;
+}
+
+function buildHydrationCheckpointLabel(hydration) {
+  return `${humanizeHydrationSource(hydration.source)} checkpointed ${hydration.rowsIngested ?? 0} rows across ${hydration.pagesIngested ?? 0} page(s) through ${formatOptionalTimestamp(hydration.checkpointTimeMs)} / trade ${hydration.lastAggTradeId ?? '—'}.`;
 }
 
 function formatDuration(value) {

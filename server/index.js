@@ -12,6 +12,7 @@ import {
   getHistoricalTradeCoverage,
   getLatestBook,
   getLatestTradeBefore,
+  getLatestTradeInRange,
   getQuantBacktestJobById,
   getQuantResultByJobId,
   getRecentTrades,
@@ -618,6 +619,7 @@ const backtestRunner = new BacktestRunner({
     saveHistoricalCoverage: (record) => saveHistoricalTradeCoverage(record),
     loadTradesByRange: (symbol, startMs, endMs, limit) => getTradesByRange(symbol, startMs, endMs, limit),
     loadLatestTradeBefore: (symbol, beforeMs) => getLatestTradeBefore(symbol, beforeMs),
+    loadLatestTradeInRange: (symbol, startMs, endMs) => getLatestTradeInRange(symbol, startMs, endMs),
     getTradeStatsByRange: (symbol, startMs, endMs) => getTradeStatsByRange(symbol, startMs, endMs),
     saveTradesBatch: (trades) => saveTradesBatch(trades),
     streamTradesByRange: (symbol, startMs, endMs, chunkSize) => streamTradesByRange(symbol, startMs, endMs, chunkSize)

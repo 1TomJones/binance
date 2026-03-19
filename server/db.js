@@ -50,6 +50,7 @@ db.exec(`
     progress_pct INTEGER NOT NULL DEFAULT 0,
     processed_items INTEGER NOT NULL DEFAULT 0,
     current_marker TEXT,
+    progress_json TEXT,
     current_date TEXT,
     current_day INTEGER,
     total_days INTEGER,
@@ -86,6 +87,7 @@ db.exec(`
     progress_pct INTEGER NOT NULL,
     processed_items INTEGER,
     current_marker TEXT,
+    progress_json TEXT,
     current_date TEXT,
     current_day INTEGER,
     total_days INTEGER,
@@ -103,6 +105,9 @@ db.exec(`
     trade_count INTEGER NOT NULL DEFAULT 0,
     first_trade_time INTEGER,
     last_trade_time INTEGER,
+    last_agg_trade_id INTEGER,
+    checkpoint_time_ms INTEGER,
+    checkpoint_rows INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL,
     source TEXT NOT NULL,
     updated_at INTEGER NOT NULL,
@@ -114,10 +119,15 @@ ensureColumn('quant_backtest_jobs', 'current_date', 'TEXT');
 ensureColumn('quant_backtest_jobs', 'current_day', 'INTEGER');
 ensureColumn('quant_backtest_jobs', 'total_days', 'INTEGER');
 ensureColumn('quant_backtest_jobs', 'closed_trade_count', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('quant_backtest_jobs', 'progress_json', 'TEXT');
 ensureColumn('quant_job_progress', 'current_date', 'TEXT');
 ensureColumn('quant_job_progress', 'current_day', 'INTEGER');
 ensureColumn('quant_job_progress', 'total_days', 'INTEGER');
 ensureColumn('quant_job_progress', 'closed_trade_count', 'INTEGER');
+ensureColumn('quant_job_progress', 'progress_json', 'TEXT');
+ensureColumn('historical_trade_coverage', 'last_agg_trade_id', 'INTEGER');
+ensureColumn('historical_trade_coverage', 'checkpoint_time_ms', 'INTEGER');
+ensureColumn('historical_trade_coverage', 'checkpoint_rows', 'INTEGER NOT NULL DEFAULT 0');
 
 const insertTradeStmt = db.prepare(`
   INSERT OR IGNORE INTO trades (
@@ -146,9 +156,9 @@ const insertStrategyStmt = db.prepare(`
 
 const createJobStmt = db.prepare(`
   INSERT INTO quant_backtest_jobs (
-    strategy_id, status, progress_pct, processed_items, current_marker, current_date, current_day, total_days, closed_trade_count, run_config_json, created_at, updated_at
+    strategy_id, status, progress_pct, processed_items, current_marker, progress_json, current_date, current_day, total_days, closed_trade_count, run_config_json, created_at, updated_at
   ) VALUES (
-    @strategy_id, 'queued', 0, 0, 'Queued', NULL, NULL, NULL, 0, @run_config_json, @created_at, @updated_at
+    @strategy_id, 'queued', 0, 0, 'Queued', NULL, NULL, NULL, NULL, 0, @run_config_json, @created_at, @updated_at
   )
 `);
 
@@ -158,6 +168,7 @@ const updateJobStmt = db.prepare(`
       progress_pct = COALESCE(@progress_pct, progress_pct),
       processed_items = COALESCE(@processed_items, processed_items),
       current_marker = COALESCE(@current_marker, current_marker),
+      progress_json = COALESCE(@progress_json, progress_json),
       current_date = COALESCE(@current_date, current_date),
       current_day = COALESCE(@current_day, current_day),
       total_days = COALESCE(@total_days, total_days),
@@ -176,9 +187,9 @@ const insertResultStmt = db.prepare(`
 
 const insertProgressStmt = db.prepare(`
   INSERT INTO quant_job_progress (
-    job_id, status, progress_pct, processed_items, current_marker, current_date, current_day, total_days, closed_trade_count, elapsed_ms, ts
+    job_id, status, progress_pct, processed_items, current_marker, progress_json, current_date, current_day, total_days, closed_trade_count, elapsed_ms, ts
   ) VALUES (
-    @job_id, @status, @progress_pct, @processed_items, @current_marker, @current_date, @current_day, @total_days, @closed_trade_count, @elapsed_ms, @ts
+    @job_id, @status, @progress_pct, @processed_items, @current_marker, @progress_json, @current_date, @current_day, @total_days, @closed_trade_count, @elapsed_ms, @ts
   )
 `);
 
@@ -201,6 +212,9 @@ const upsertHistoricalTradeCoverageStmt = db.prepare(`
     trade_count,
     first_trade_time,
     last_trade_time,
+    last_agg_trade_id,
+    checkpoint_time_ms,
+    checkpoint_rows,
     status,
     source,
     updated_at
@@ -213,6 +227,9 @@ const upsertHistoricalTradeCoverageStmt = db.prepare(`
     @trade_count,
     @first_trade_time,
     @last_trade_time,
+    @last_agg_trade_id,
+    @checkpoint_time_ms,
+    @checkpoint_rows,
     @status,
     @source,
     @updated_at
@@ -224,6 +241,9 @@ const upsertHistoricalTradeCoverageStmt = db.prepare(`
     trade_count = excluded.trade_count,
     first_trade_time = excluded.first_trade_time,
     last_trade_time = excluded.last_trade_time,
+    last_agg_trade_id = excluded.last_agg_trade_id,
+    checkpoint_time_ms = excluded.checkpoint_time_ms,
+    checkpoint_rows = excluded.checkpoint_rows,
     status = excluded.status,
     source = excluded.source,
     updated_at = excluded.updated_at
@@ -234,6 +254,7 @@ const QUANT_BACKTEST_JOB_UPDATE_DEFAULTS = Object.freeze({
   progress_pct: null,
   processed_items: null,
   current_marker: null,
+  progress_json: null,
   current_date: null,
   current_day: null,
   total_days: null,
@@ -373,6 +394,17 @@ export function getLatestTradeBefore(symbol, beforeMs) {
   `).get(symbol, beforeMs);
 }
 
+export function getLatestTradeInRange(symbol, start, end) {
+  return db.prepare(`
+    SELECT trade_id, symbol, price, quantity, trade_time, maker_flag, side, ingest_ts
+    FROM trades
+    WHERE symbol = ?
+      AND trade_time BETWEEN ? AND ?
+    ORDER BY trade_time DESC, trade_id DESC
+    LIMIT 1
+  `).get(symbol, start, end);
+}
+
 export function getTradeStatsByRange(symbol, start, end) {
   return db.prepare(`
     SELECT COUNT(*) as count, MIN(trade_time) as minTradeTime, MAX(trade_time) as maxTradeTime
@@ -384,7 +416,8 @@ export function getTradeStatsByRange(symbol, start, end) {
 export function getHistoricalTradeCoverage(symbol, dayStartMs) {
   return db.prepare(`
     SELECT symbol, day_start_ms, day_end_ms, coverage_start_ms, coverage_end_ms, trade_count,
-           first_trade_time, last_trade_time, status, source, updated_at
+           first_trade_time, last_trade_time, last_agg_trade_id, checkpoint_time_ms, checkpoint_rows,
+           status, source, updated_at
     FROM historical_trade_coverage
     WHERE symbol = ? AND day_start_ms = ?
   `).get(symbol, dayStartMs);
@@ -433,6 +466,7 @@ export function createQuantBacktestJob(record) {
     progress_pct: job.progress_pct,
     processed_items: job.processed_items,
     current_marker: job.current_marker,
+    progress_json: job.progress_json,
     current_date: job.current_date,
     current_day: job.current_day,
     total_days: job.total_days,
@@ -453,6 +487,7 @@ export function updateQuantBacktestJob(id, patch = {}) {
     progress_pct: job.progress_pct,
     processed_items: job.processed_items,
     current_marker: job.current_marker,
+    progress_json: job.progress_json,
     current_date: job.current_date,
     current_day: job.current_day,
     total_days: job.total_days,
