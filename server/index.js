@@ -9,19 +9,23 @@ import {
   completeQuantBacktestJob,
   createQuantBacktestJob,
   failQuantBacktestJob,
+  getHistoricalTradeCoverage,
   getLatestBook,
   getLatestTradeBefore,
   getQuantBacktestJobById,
   getQuantResultByJobId,
   getRecentTrades,
+  getTradeStatsByRange,
   getTradesByRange,
   listQuantBacktestJobs,
   listQuantJobProgress,
   saveBookTicker,
+  saveHistoricalTradeCoverage,
   saveQuantBacktestResult,
   saveQuantLiveRun,
   saveQuantStrategy,
   saveTrade,
+  saveTradesBatch,
   updateQuantBacktestJob,
   getQuantStrategyById,
   listQuantStrategies
@@ -30,6 +34,7 @@ import { BacktestJobService } from './quant/backtestJobService.js';
 import { StrategyParser } from './quant/strategyParser.js';
 import { PAPER_EXECUTION_LIMITS, StrategyExecutionEngine } from './quant/strategyExecutionEngine.js';
 import { BacktestRunner } from './quant/backtestRunner.js';
+import { HistoricalBacktestDataService } from './quant/historicalBacktestDataService.js';
 import { enrichMarketCandles } from './quant/candleEnrichment.js';
 import { LivePaperRunner, LIVE_PAPER_LIMITS } from './quant/livePaperRunner.js';
 import { getBuiltInStrategyDefinition, listBuiltInStrategyCatalog } from './quant/builtinStrategies.js';
@@ -607,6 +612,14 @@ function buildStrategyCatalog() {
 
 const backtestRunner = new BacktestRunner({
   executionEngine,
+  historicalDataService: new HistoricalBacktestDataService({
+    getHistoricalCoverage: (symbol, dayStartMs) => getHistoricalTradeCoverage(symbol, dayStartMs),
+    saveHistoricalCoverage: (record) => saveHistoricalTradeCoverage(record),
+    loadTradesByRange: (symbol, startMs, endMs, limit) => getTradesByRange(symbol, startMs, endMs, limit),
+    loadLatestTradeBefore: (symbol, beforeMs) => getLatestTradeBefore(symbol, beforeMs),
+    getTradeStatsByRange: (symbol, startMs, endMs) => getTradeStatsByRange(symbol, startMs, endMs),
+    saveTradesBatch: (trades) => saveTradesBatch(trades)
+  }),
   loadTrades: ({ symbol, startMs, endMs, limit }) => getTradesByRange(symbol, startMs, endMs, limit),
   loadSeedTrade: ({ symbol, beforeMs }) => getLatestTradeBefore(symbol, beforeMs)
 });

@@ -5,10 +5,11 @@ const PROGRESS_EMIT_EVERY_CANDLES = 25;
 const YIELD_EVERY_CANDLES = 100;
 
 export class BacktestRunner {
-  constructor({ executionEngine, loadTrades, loadSeedTrade }) {
+  constructor({ executionEngine, loadTrades, loadSeedTrade, historicalDataService }) {
     this.executionEngine = executionEngine;
     this.loadTrades = loadTrades;
     this.loadSeedTrade = loadSeedTrade;
+    this.historicalDataService = historicalDataService;
   }
 
   async run({ strategy, runConfig, progressCallback, shouldStop }) {
@@ -43,17 +44,30 @@ export class BacktestRunner {
       shouldStop?.();
       emitProgress({ currentDate: isoDate, currentDay: dayIndex + 1, stage: 'Loading session history' });
 
-      const dayTrades = this.loadTrades({
-        symbol: strategy.market.symbol,
-        startMs: dayStartMs,
-        endMs: dayEndMs,
-        limit: null
-      });
-
-      const seedTrade = this.loadSeedTrade?.({
-        symbol: strategy.market.symbol,
-        beforeMs: dayStartMs
-      }) || null;
+      const { trades: dayTrades, seedTrade } = this.historicalDataService
+        ? await this.historicalDataService.loadDay({
+            symbol: strategy.market.symbol,
+            dayStartMs,
+            dayEndMs,
+            shouldStop,
+            progressCallback: ({ stage }) => emitProgress({
+              currentDate: isoDate,
+              currentDay: dayIndex + 1,
+              stage
+            })
+          })
+        : {
+            trades: this.loadTrades({
+              symbol: strategy.market.symbol,
+              startMs: dayStartMs,
+              endMs: dayEndMs,
+              limit: null
+            }),
+            seedTrade: this.loadSeedTrade?.({
+              symbol: strategy.market.symbol,
+              beforeMs: dayStartMs
+            }) || null
+          };
 
       const sessionReplay = new HistoricalMarketReplay({
         timeframe: strategy.market.timeframe,
