@@ -44,7 +44,7 @@ export class BacktestRunner {
       shouldStop?.();
       emitProgress({ currentDate: isoDate, currentDay: dayIndex + 1, stage: 'Loading session history' });
 
-      const { trades: dayTrades, seedTrade } = this.historicalDataService
+      const dayPayload = this.historicalDataService
         ? await this.historicalDataService.loadDay({
             symbol: strategy.market.symbol,
             dayStartMs,
@@ -69,20 +69,28 @@ export class BacktestRunner {
             }) || null
           };
 
+      const tradeSource = dayPayload.tradeStream || dayPayload.trades || [];
+      const seedTrade = dayPayload.seedTrade || null;
+      const totalDayTrades = Math.max(Number(dayPayload.tradeCount ?? (Array.isArray(tradeSource) ? tradeSource.length : 0)) || 0, 1);
+
       const sessionReplay = new HistoricalMarketReplay({
         timeframe: strategy.market.timeframe,
         sessionStartMs: dayStartMs,
         sessionEndMs: dayEndMs,
-        seedPrice: seedTrade?.price ?? dayTrades[0]?.price ?? null,
+        seedPrice: seedTrade?.price ?? null,
         settings: runState.settings
       });
 
       const dayTradeStartIndex = runState.trades.length;
-      const totalDayTrades = Math.max(dayTrades.length, 1);
+      let replayedTradeCount = 0;
 
-      for (let tradeIndex = 0; tradeIndex < dayTrades.length; tradeIndex += 1) {
+      for await (const trade of iterateTrades(tradeSource)) {
         shouldStop?.();
-        const closedCandles = sessionReplay.processTrade(dayTrades[tradeIndex]);
+        replayedTradeCount += 1;
+        if (sessionReplay.seedPrice == null && Number.isFinite(Number(trade?.price))) {
+          sessionReplay.seedPrice = Number(trade.price);
+        }
+        const closedCandles = sessionReplay.processTrade(trade);
         ({ processedCandles, emittedSinceProgress, emittedSinceYield } = await this.#drainCandles({
           closedCandles,
           strategy,
@@ -93,7 +101,7 @@ export class BacktestRunner {
           emitProgress,
           currentDate: isoDate,
           currentDay: dayIndex + 1,
-          progressStage: `Replaying session ${tradeIndex + 1}/${totalDayTrades} trades`
+          progressStage: `Replaying session ${Math.min(replayedTradeCount, totalDayTrades)}/${totalDayTrades} trades`
         }));
       }
 
@@ -124,7 +132,7 @@ export class BacktestRunner {
         isoDate,
         candleCount: candlesPerDay,
         trades: dayTradesClosed,
-        sourceTradeCount: dayTrades.length,
+        sourceTradeCount: replayedTradeCount,
         flattenedTrade
       }));
 
@@ -247,4 +255,16 @@ function round(value) {
 
 function yieldToEventLoop() {
   return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+
+async function* iterateTrades(tradeSource) {
+  if (!tradeSource) return;
+  if (typeof tradeSource[Symbol.asyncIterator] === 'function') {
+    for await (const trade of tradeSource) yield trade;
+    return;
+  }
+  if (typeof tradeSource[Symbol.iterator] === 'function') {
+    for (const trade of tradeSource) yield trade;
+  }
 }

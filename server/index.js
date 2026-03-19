@@ -17,6 +17,7 @@ import {
   getRecentTrades,
   getTradeStatsByRange,
   getTradesByRange,
+  streamTradesByRange,
   listQuantBacktestJobs,
   listQuantJobProgress,
   saveBookTicker,
@@ -618,7 +619,8 @@ const backtestRunner = new BacktestRunner({
     loadTradesByRange: (symbol, startMs, endMs, limit) => getTradesByRange(symbol, startMs, endMs, limit),
     loadLatestTradeBefore: (symbol, beforeMs) => getLatestTradeBefore(symbol, beforeMs),
     getTradeStatsByRange: (symbol, startMs, endMs) => getTradeStatsByRange(symbol, startMs, endMs),
-    saveTradesBatch: (trades) => saveTradesBatch(trades)
+    saveTradesBatch: (trades) => saveTradesBatch(trades),
+    streamTradesByRange: (symbol, startMs, endMs, chunkSize) => streamTradesByRange(symbol, startMs, endMs, chunkSize)
   }),
   loadTrades: ({ symbol, startMs, endMs, limit }) => getTradesByRange(symbol, startMs, endMs, limit),
   loadSeedTrade: ({ symbol, beforeMs }) => getLatestTradeBefore(symbol, beforeMs)

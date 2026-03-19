@@ -302,7 +302,7 @@ export function getTradesByRange(symbol, start, end, limit = 20000) {
       FROM trades
       WHERE symbol = ?
         AND trade_time BETWEEN ? AND ?
-      ORDER BY trade_time ASC
+      ORDER BY trade_time ASC, trade_id ASC
     `).all(symbol, start, end);
   }
 
@@ -311,9 +311,55 @@ export function getTradesByRange(symbol, start, end, limit = 20000) {
     FROM trades
     WHERE symbol = ?
       AND trade_time BETWEEN ? AND ?
-    ORDER BY trade_time ASC
+    ORDER BY trade_time ASC, trade_id ASC
     LIMIT ?
   `).all(symbol, start, end, limit);
+}
+
+
+export function* streamTradesByRange(symbol, start, end, chunkSize = 5000) {
+  const pageSize = Math.max(Number(chunkSize) || 0, 1);
+  let cursorTradeTime = null;
+  let cursorTradeId = null;
+
+  while (true) {
+    const rows = getTradesCursorPage(symbol, start, end, cursorTradeTime, cursorTradeId, pageSize);
+    if (!rows.length) break;
+
+    for (const row of rows) {
+      yield row;
+    }
+
+    const lastRow = rows.at(-1);
+    cursorTradeTime = Number(lastRow.trade_time);
+    cursorTradeId = Number(lastRow.trade_id);
+  }
+}
+
+function getTradesCursorPage(symbol, start, end, cursorTradeTime, cursorTradeId, limit) {
+  if (cursorTradeTime == null || cursorTradeId == null) {
+    return db.prepare(`
+      SELECT trade_id, symbol, price, quantity, trade_time, maker_flag, side, ingest_ts
+      FROM trades
+      WHERE symbol = ?
+        AND trade_time BETWEEN ? AND ?
+      ORDER BY trade_time ASC, trade_id ASC
+      LIMIT ?
+    `).all(symbol, start, end, limit);
+  }
+
+  return db.prepare(`
+    SELECT trade_id, symbol, price, quantity, trade_time, maker_flag, side, ingest_ts
+    FROM trades
+    WHERE symbol = ?
+      AND trade_time BETWEEN ? AND ?
+      AND (
+        trade_time > ?
+        OR (trade_time = ? AND trade_id > ?)
+      )
+    ORDER BY trade_time ASC, trade_id ASC
+    LIMIT ?
+  `).all(symbol, start, end, cursorTradeTime, cursorTradeTime, cursorTradeId, limit);
 }
 
 export function getLatestTradeBefore(symbol, beforeMs) {
@@ -322,7 +368,7 @@ export function getLatestTradeBefore(symbol, beforeMs) {
     FROM trades
     WHERE symbol = ?
       AND trade_time < ?
-    ORDER BY trade_time DESC
+    ORDER BY trade_time DESC, trade_id DESC
     LIMIT 1
   `).get(symbol, beforeMs);
 }
