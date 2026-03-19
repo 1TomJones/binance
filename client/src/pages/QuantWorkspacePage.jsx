@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { quantApi } from '../services/quantApi.js';
+import { deriveBacktestProgress } from '../utils/backtestProgress.js';
 
 const FALLBACK_LIMITS = {
   orderSizeMin: 0.0001,
@@ -109,7 +110,7 @@ export function QuantWorkspacePage() {
   const effectiveSymbol = snapshot?.symbol || liveStrategy?.symbol || 'BTCUSDT';
   const position = snapshot?.position || buildFlatPosition();
   const performance = snapshot?.performance || buildEmptyPerformance();
-  const progress = deriveCurrentProgress(backtestJob);
+  const progress = deriveBacktestProgress(backtestJob);
 
   const handleNumberChange = (field) => (event) => {
     const value = Number(event.target.value);
@@ -605,6 +606,12 @@ function ProgressPanel({ progress }) {
         <MetricCard label="Closed trades" value={progress.totalTrades} />
         <MetricCard label="Replay stage" value={progress.marker} />
       </div>
+      {progress.errorMessage ? (
+        <div className="quant-note-card">
+          <strong>Failure reason</strong>
+          <span>{progress.errorMessage}</span>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -977,21 +984,6 @@ function findStrategy(strategyOptions, selection) {
   )) || strategyOptions.all[0] || null;
 }
 
-function deriveCurrentProgress(job) {
-  const latest = job?.status ? job : null;
-  const currentDay = Number(latest?.current_day || 0);
-  const totalDays = Number(latest?.total_days || 0);
-  return {
-    status: humanizeStatus(latest?.status || 'ready'),
-    currentDate: latest?.current_date || parseCurrentDate(latest?.current_marker) || '—',
-    currentDayLabel: currentDay && totalDays ? `Day ${currentDay} / ${totalDays}` : '—',
-    percent: latest?.progress_pct || 0,
-    elapsedMs: latest?.elapsed_ms || 0,
-    totalTrades: latest?.closed_trade_count || parseTradeCount(latest?.current_marker),
-    marker: latest?.current_marker || 'Waiting to start'
-  };
-}
-
 function buildBacktestMetrics(summary = {}) {
   const sessionResults = summary.sessionResults || [];
   const positiveSessions = sessionResults.filter((row) => Number(row.realizedPnl || 0) > 0).length;
@@ -1071,13 +1063,6 @@ function humanizeStatus(value) {
   return map[value] || value || 'Ready';
 }
 
-function parseCurrentDate(marker) {
-  return marker?.match(/\d{4}-\d{2}-\d{2}/)?.[0] || null;
-}
-
-function parseTradeCount(marker) {
-  return Number(marker?.match(/(\d+) trades/)?.[1] || 0);
-}
 
 function toDateInput(date) {
   return new Date(date).toISOString().slice(0, 10);
