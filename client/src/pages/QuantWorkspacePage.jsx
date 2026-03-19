@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { quantApi } from '../services/quantApi.js';
 import { deriveBacktestProgress } from '../utils/backtestProgress.js';
+import { buildDefaultBacktestDateRange, rangeIncludesCurrentUtcDay, shouldPollLiveWorkspace } from '../utils/quantWorkspaceMode.js';
 
 const FALLBACK_LIMITS = {
   orderSizeMin: 0.0001,
@@ -21,6 +22,7 @@ const DEFAULT_SETTINGS = {
 const DEFAULT_BACKTEST_CONFIG = {
   startDate: '',
   endDate: '',
+  includeCurrentDay: false,
   initialBalance: 10000,
   ...DEFAULT_SETTINGS
 };
@@ -41,7 +43,8 @@ export function QuantWorkspacePage() {
   const [liveBusy, setLiveBusy] = useState(false);
   const [backtestBusy, setBacktestBusy] = useState(false);
   const [uploadBusy, setUploadBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [liveError, setLiveError] = useState('');
+  const [backtestError, setBacktestError] = useState('');
   const [uploadMessage, setUploadMessage] = useState('');
   const jobPollRef = useRef(null);
 
@@ -57,8 +60,7 @@ export function QuantWorkspacePage() {
         if (!mounted) return;
 
         const today = new Date();
-        const endDate = toDateInput(today);
-        const start = new Date(today.getTime() - 6 * 86400000);
+        const { defaultStartDate, defaultEndDate } = buildDefaultBacktestDateRange(today);
 
         setCatalog(catalogPayload.strategies || { builtIn: [], uploaded: [] });
         setLimits(catalogPayload.limits || FALLBACK_LIMITS);
@@ -67,11 +69,11 @@ export function QuantWorkspacePage() {
         setBacktestConfig((prev) => ({
           ...prev,
           initialBalance: catalogPayload.limits?.initialBalance || FALLBACK_LIMITS.initialBalance,
-          startDate: prev.startDate || toDateInput(start),
-          endDate: prev.endDate || endDate
+          startDate: prev.startDate || defaultStartDate,
+          endDate: prev.endDate || defaultEndDate
         }));
       } catch (loadError) {
-        if (mounted) setError(loadError.message);
+        if (mounted) setLiveError(loadError.message);
       } finally {
         if (mounted) setLoading(false);
       }
@@ -79,22 +81,31 @@ export function QuantWorkspacePage() {
 
     loadInitial();
 
+    return () => {
+      mounted = false;
+      clearInterval(jobPollRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!shouldPollLiveWorkspace(mode)) return undefined;
+    let active = true;
+
     const poll = setInterval(async () => {
       try {
         const payload = await quantApi.getLiveWorkspace();
-        if (!mounted) return;
+        if (!active) return;
         setSnapshot(payload.snapshot || null);
       } catch (pollError) {
-        if (mounted) setError(pollError.message);
+        if (active) setLiveError(pollError.message);
       }
     }, 2000);
 
     return () => {
-      mounted = false;
+      active = false;
       clearInterval(poll);
-      clearInterval(jobPollRef.current);
     };
-  }, []);
+  }, [mode]);
 
   const strategyOptions = useMemo(() => {
     const builtIn = (catalog.builtIn || []).map((item) => ({ ...item, kind: 'built_in', value: `built_in:${item.key}` }));
@@ -111,6 +122,7 @@ export function QuantWorkspacePage() {
   const position = snapshot?.position || buildFlatPosition();
   const performance = snapshot?.performance || buildEmptyPerformance();
   const progress = deriveBacktestProgress(backtestJob);
+  const backtestTouchesCurrentDay = rangeIncludesCurrentUtcDay(backtestConfig.startDate, backtestConfig.endDate);
 
   const handleNumberChange = (field) => (event) => {
     const value = Number(event.target.value);
@@ -148,7 +160,8 @@ export function QuantWorkspacePage() {
   async function handleUpload(file) {
     if (!file) return;
     setUploadBusy(true);
-    setError('');
+    setLiveError('');
+    setBacktestError('');
     setUploadMessage('');
     try {
       const content = await file.text();
@@ -156,7 +169,7 @@ export function QuantWorkspacePage() {
       await refreshCatalogAndSelectUploaded(payload.strategy);
       setUploadMessage(`Uploaded ${file.name} successfully.`);
     } catch (uploadError) {
-      setError(uploadError.message);
+      setLiveError(uploadError.message);
     } finally {
       setUploadBusy(false);
     }
@@ -165,7 +178,7 @@ export function QuantWorkspacePage() {
   const startStrategy = async () => {
     if (!liveStrategy) return;
     setLiveBusy(true);
-    setError('');
+    setLiveError('');
     try {
       const payload = await quantApi.startLivePaper({
         strategyRef: liveSelection,
@@ -173,7 +186,7 @@ export function QuantWorkspacePage() {
       });
       setSnapshot(payload.run || null);
     } catch (startError) {
-      setError(startError.message);
+      setLiveError(startError.message);
     } finally {
       setLiveBusy(false);
     }
@@ -181,12 +194,12 @@ export function QuantWorkspacePage() {
 
   const stopStrategy = async () => {
     setLiveBusy(true);
-    setError('');
+    setLiveError('');
     try {
       const payload = await quantApi.stopLivePaper();
       setSnapshot(payload.run || null);
     } catch (stopError) {
-      setError(stopError.message);
+      setLiveError(stopError.message);
     } finally {
       setLiveBusy(false);
     }
@@ -195,7 +208,7 @@ export function QuantWorkspacePage() {
   const startBacktest = async () => {
     if (!backtestStrategy) return;
     setBacktestBusy(true);
-    setError('');
+    setBacktestError('');
     setBacktestResult(null);
     try {
       const payload = await quantApi.startBacktest({
@@ -205,7 +218,7 @@ export function QuantWorkspacePage() {
       setBacktestJob(payload.job || { id: payload.jobId });
       startJobPolling(payload.jobId);
     } catch (startError) {
-      setError(startError.message);
+      setBacktestError(startError.message);
     } finally {
       setBacktestBusy(false);
     }
@@ -214,14 +227,14 @@ export function QuantWorkspacePage() {
   const cancelBacktest = async () => {
     if (!backtestJob?.id) return;
     setBacktestBusy(true);
-    setError('');
+    setBacktestError('');
     try {
       await quantApi.cancelBacktest(backtestJob.id);
       clearInterval(jobPollRef.current);
       const payload = await quantApi.getBacktestJob(backtestJob.id);
       setBacktestJob(payload.job || null);
     } catch (cancelError) {
-      setError(cancelError.message);
+      setBacktestError(cancelError.message);
     } finally {
       setBacktestBusy(false);
     }
@@ -241,7 +254,7 @@ export function QuantWorkspacePage() {
           clearInterval(jobPollRef.current);
         }
       } catch (pollError) {
-        setError(pollError.message);
+        setBacktestError(pollError.message);
         clearInterval(jobPollRef.current);
       }
     };
@@ -271,7 +284,7 @@ export function QuantWorkspacePage() {
         <button className={mode === 'backtest' ? 'is-active' : ''} onClick={() => setMode('backtest')}>Backtest</button>
       </section>
 
-      {error ? <div className="quant-banner quant-banner-error">{error}</div> : null}
+      {(mode === 'live' ? liveError : backtestError) ? <div className="quant-banner quant-banner-error">{mode === 'live' ? liveError : backtestError}</div> : null}
       {uploadMessage ? <div className="quant-banner">{uploadMessage}</div> : null}
       {loading ? <div className="quant-banner">Loading Quant workspace…</div> : null}
 
@@ -433,6 +446,7 @@ export function QuantWorkspacePage() {
                   <input type="date" value={backtestConfig.endDate} onChange={handleBacktestDateChange('endDate')} min={backtestConfig.startDate || undefined} />
                   <small>Open positions flatten at end of each UTC day.</small>
                 </Field>
+                <ToggleField label="Include current UTC day (slower)" checked={backtestConfig.includeCurrentDay} onChange={handleBacktestToggleChange('includeCurrentDay')} />
                 <Field label="Order size">
                   <input type="number" min={limits.orderSizeMin} max={limits.orderSizeMax} step={limits.orderSizeStep} value={backtestConfig.orderSize} onChange={handleBacktestNumberChange('orderSize')} />
                   <small>{`${limits.orderSizeMin.toFixed(4)} to ${limits.orderSizeMax.toFixed(4)} BTC`}</small>
@@ -442,8 +456,16 @@ export function QuantWorkspacePage() {
                 </Field>
                 <div className="quant-note-card">
                   <strong>Replay model</strong>
-                  <span>Historical data is processed asynchronously in chronological order using the same paper execution rules as live mode.</span>
+                  <span>Historical coverage is prepared first, then replay runs entirely from local SQLite/cache in chronological order using the same paper execution rules as live mode.</span>
                 </div>
+                {backtestTouchesCurrentDay ? (
+                  <div className="quant-note-card">
+                    <strong>Current UTC day in range</strong>
+                    <span>{backtestConfig.includeCurrentDay
+                      ? 'This run includes the current UTC day, so coverage will use the slower dedicated tail-hydration path before replay starts.'
+                      : 'This range touches the current UTC day. Enable “Include current UTC day (slower)” or choose an end date before today to stay on completed-day coverage only.'}</span>
+                  </div>
+                ) : null}
                 <Field label="Stop loss %">
                   <input type="number" min="0.01" max="25" step="0.01" value={backtestConfig.stopLossPct} onChange={handleBacktestNumberChange('stopLossPct')} />
                 </Field>
@@ -592,6 +614,7 @@ function StrategySourcePanel({ title, description, options, selection, onSelecti
 
 function ProgressPanel({ progress }) {
   const pct = Math.max(0, Math.min(100, progress.percent || 0));
+  const coverage = progress.coverage || {};
   const hydration = progress.hydration || {};
   const replay = progress.replay || {};
   const hydrationRetry = hydration.retry || null;
@@ -601,6 +624,7 @@ function ProgressPanel({ progress }) {
         <div className="quant-progress-fill" style={{ width: `${pct}%` }} />
       </div>
       <div className="quant-progress-grid">
+        <MetricCard label="Primary state" value={progress.primaryLabel || 'Waiting to start'} />
         <MetricCard label="Status" value={progress.status} />
         <MetricCard label="Current session" value={progress.currentDayLabel} />
         <MetricCard label="Current UTC date" value={progress.currentDate} />
@@ -610,17 +634,33 @@ function ProgressPanel({ progress }) {
         <MetricCard label="Active stage" value={progress.marker} />
       </div>
       <div className="quant-progress-grid">
+        <MetricCard label="Days ready" value={formatCoverageReadyLabel(coverage)} />
+        <MetricCard label="Waiting on coverage" value={coverage.waitingOnCoverage ? 'Yes' : 'No'} />
+        <MetricCard label="Hydrating day" value={coverage.hydratingDay || '—'} />
+        <MetricCard label="Current-day tail" value={coverage.currentUtcDaySlowPath ? 'Included' : 'Completed days only'} />
         <MetricCard label="Hydration source" value={humanizeHydrationSource(hydration.source)} />
         <MetricCard label="Hydration status" value={humanizeHydrationStatus(hydration.status)} />
         <MetricCard label="Rows ingested" value={hydration.rowsIngested ?? '—'} />
         <MetricCard label="REST pages" value={hydration.pagesIngested ?? '—'} />
-        <MetricCard label="Checkpoint time" value={formatOptionalTimestamp(hydration.checkpointTimeMs)} />
-        <MetricCard label="Checkpoint trade id" value={hydration.lastAggTradeId ?? '—'} />
-        <MetricCard label="Hydration %" value={formatPercentOrDash(hydration.percent)} />
         <MetricCard label="Replay trades" value={formatReplayTradeProgress(replay)} />
         <MetricCard label="Replay status" value={humanizeHydrationStatus(replay.status)} />
-        <MetricCard label="Replay %" value={formatPercentOrDash(replay.percent)} />
       </div>
+      {coverage.requestedCurrentUtcDay ? (
+        <div className="quant-note-card">
+          <strong>Current UTC day handling</strong>
+          <span>{coverage.currentUtcDaySlowPath
+            ? 'Current UTC day is included, so replay is waiting for the slower dedicated tail-hydration path before local replay begins.'
+            : 'Completed UTC days only. The current UTC day is excluded from this run unless explicitly enabled.'}</span>
+        </div>
+      ) : null}
+      {coverage.waitingOnCoverage ? (
+        <div className="quant-note-card">
+          <strong>Coverage state</strong>
+          <span>{coverage.hydratingDay
+            ? `Replay is waiting for historical coverage to finish for ${coverage.hydratingDay}.`
+            : 'Replay is waiting for the historical coverage plan to finish.'}</span>
+        </div>
+      ) : null}
       {hydrationRetry ? (
         <div className="quant-note-card">
           <strong>Hydration retry/backoff</strong>
@@ -1108,7 +1148,8 @@ function humanizeHydrationSource(value) {
     'bulk-file': 'Bulk daily ZIP',
     'binance-rest': 'Binance REST',
     'binance-rest-fallback': 'REST fallback',
-    'sqlite-reconciled': 'SQLite resume'
+    'sqlite-reconciled': 'SQLite resume',
+    'current-day-tail': 'Current-day tail'
   };
   return map[value] || value;
 }
@@ -1162,6 +1203,11 @@ function formatPercentOrDash(value) {
 function formatReplayTradeProgress(replay) {
   if (!Number.isFinite(Number(replay?.totalTrades))) return '—';
   return `${replay?.replayedTrades || 0} / ${replay?.totalTrades || 0}`;
+}
+
+function formatCoverageReadyLabel(coverage) {
+  if (!Number.isFinite(Number(coverage?.totalDays))) return '—';
+  return `${coverage?.readyDays || 0} / ${coverage?.totalDays || 0}`;
 }
 
 function buildHydrationCheckpointLabel(hydration) {

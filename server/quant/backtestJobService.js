@@ -1,6 +1,7 @@
 export class BacktestJobService {
   constructor({
     backtestRunner,
+    historicalDataService,
     resolveStrategy,
     createJob,
     updateJob,
@@ -11,6 +12,7 @@ export class BacktestJobService {
     getJobById
   }) {
     this.backtestRunner = backtestRunner;
+    this.historicalDataService = historicalDataService;
     this.resolveStrategy = resolveStrategy;
     this.createJob = createJob;
     this.updateJob = updateJob;
@@ -22,13 +24,18 @@ export class BacktestJobService {
   }
 
   start({ strategyRef, runConfig }) {
+    const normalizedRunConfig = {
+      includeCurrentDay: Boolean(runConfig?.includeCurrentDay),
+      ...runConfig
+    };
+
     const job = this.createJob({
       strategy_id: strategyRef?.id && Number.isFinite(Number(strategyRef.id)) ? Number(strategyRef.id) : null,
-      run_config_json: JSON.stringify({ ...runConfig, strategyRef })
+      run_config_json: JSON.stringify({ ...normalizedRunConfig, strategyRef })
     });
 
     setTimeout(() => {
-      this.#run(job.id, strategyRef, runConfig).catch((error) => {
+      this.#run(job.id, strategyRef, normalizedRunConfig).catch((error) => {
         console.error('[backtest] uncaught runner failure', { jobId: job.id, error: error?.message || error });
       });
     }, 0);
@@ -38,57 +45,134 @@ export class BacktestJobService {
 
   async #run(jobId, strategyRef, runConfig) {
     const startedAt = Date.now();
+    let latestCoverage = null;
+
+    const assertNotCancelled = () => {
+      const dbJob = this.getJobById(jobId);
+      if (!dbJob || dbJob.status === 'cancelled') throw new Error('cancelled');
+    };
+
+    const persistProgress = ({
+      processed = 0,
+      total = 1,
+      progressPct = null,
+      marker,
+      currentDate,
+      currentDay,
+      totalDays,
+      totalTrades = 0,
+      elapsedMs,
+      phase,
+      coverage = latestCoverage,
+      hydration = null,
+      replay = null
+    }) => {
+      assertNotCancelled();
+      this.updateJob(jobId, {
+        status: 'running',
+        progress_pct: Number.isFinite(Number(progressPct))
+          ? Math.max(0, Math.min(Math.floor(Number(progressPct)), 99))
+          : Math.min(Math.floor((processed / Math.max(total, 1)) * 100), 99),
+        processed_items: processed,
+        current_marker: marker,
+        progress_json: JSON.stringify({
+          phase: phase || null,
+          coverage: coverage || null,
+          hydration: hydration || null,
+          replay: replay || null
+        }),
+        current_date: currentDate,
+        current_day: currentDay,
+        total_days: totalDays,
+        closed_trade_count: totalTrades,
+        elapsed_ms: elapsedMs
+      });
+    };
 
     try {
       const resolved = this.resolveStrategy(strategyRef);
       if (!resolved) throw new Error('Strategy not found');
 
-      this.updateJob(jobId, {
-        status: 'running',
-        progress_pct: 1,
-        current_marker: 'Preparing replay engine',
-        progress_json: JSON.stringify({
-          phase: 'preparing',
-          hydration: null,
-          replay: null
-        }),
-        current_date: runConfig?.startDate || null,
-        current_day: 1,
-        total_days: computeDayCount(runConfig?.startDate, runConfig?.endDate),
-        closed_trade_count: 0,
-        elapsed_ms: 0
+      persistProgress({
+        progressPct: 1,
+        marker: 'Preparing historical coverage',
+        phase: 'planning',
+        currentDate: runConfig?.startDate || null,
+        currentDay: 1,
+        totalDays: computeDayCount(runConfig?.startDate, runConfig?.endDate),
+        elapsedMs: 0,
+        coverage: {
+          totalDays: computeDayCount(runConfig?.startDate, runConfig?.endDate),
+          readyDays: 0,
+          hydratableDays: 0,
+          waitingOnCoverage: true,
+          hydratingDay: null,
+          includeCurrentDay: Boolean(runConfig?.includeCurrentDay),
+          requestedCurrentUtcDay: false,
+          currentUtcDaySlowPath: false,
+          classifications: []
+        }
       });
+
+      const coveragePlan = await this.historicalDataService.prepareCoverage({
+        symbol: resolved.strategy.market?.symbol,
+        startDate: runConfig.startDate,
+        endDate: runConfig.endDate,
+        includeCurrentDay: Boolean(runConfig.includeCurrentDay),
+        shouldStop: assertNotCancelled,
+        progressCallback: ({ phase, stage, progressPct, coverage, hydration, currentDate, currentDay, totalDays }) => {
+          latestCoverage = coverage || latestCoverage;
+          persistProgress({
+            progressPct,
+            marker: stage,
+            phase,
+            coverage: latestCoverage,
+            hydration,
+            replay: null,
+            currentDate,
+            currentDay,
+            totalDays,
+            elapsedMs: Date.now() - startedAt,
+            totalTrades: 0
+          });
+        }
+      });
+
+      latestCoverage = {
+        totalDays: coveragePlan.totalDays,
+        readyDays: coveragePlan.readyDays,
+        hydratableDays: coveragePlan.hydratableDays,
+        waitingOnCoverage: false,
+        hydratingDay: null,
+        includeCurrentDay: coveragePlan.includeCurrentDay,
+        requestedCurrentUtcDay: coveragePlan.requestedCurrentUtcDay,
+        currentUtcDaySlowPath: coveragePlan.requestedCurrentUtcDay && coveragePlan.includeCurrentDay,
+        classifications: summarizeCoveragePlan(coveragePlan.days)
+      };
 
       const resultPayload = await this.backtestRunner.run({
         strategy: resolved.strategy,
+        coveragePlan,
         runConfig: {
           ...runConfig,
           startedAtIso: new Date(startedAt).toISOString()
         },
-        shouldStop: () => {
-          const dbJob = this.getJobById(jobId);
-          if (!dbJob || dbJob.status === 'cancelled') throw new Error('cancelled');
-        },
+        shouldStop: assertNotCancelled,
         progressCallback: ({ processed, total, progressPct, marker, currentDate, currentDay, totalDays, totalTrades, elapsedMs, phase, hydration, replay }) => {
-          const dbJob = this.getJobById(jobId);
-          if (!dbJob || dbJob.status === 'cancelled') throw new Error('cancelled');
-          this.updateJob(jobId, {
-            status: 'running',
-            progress_pct: Number.isFinite(Number(progressPct))
-              ? Math.max(0, Math.min(Math.floor(Number(progressPct)), 99))
-              : Math.min(Math.floor((processed / Math.max(total, 1)) * 100), 99),
-            processed_items: processed,
-            current_marker: marker,
-            progress_json: JSON.stringify({
-              phase: phase || null,
-              hydration: hydration || null,
-              replay: replay || null
-            }),
-            current_date: currentDate,
-            current_day: currentDay,
-            total_days: totalDays,
-            closed_trade_count: totalTrades,
-            elapsed_ms: elapsedMs
+          persistProgress({
+            processed,
+            total,
+            progressPct,
+            marker,
+            currentDate,
+            currentDay,
+            totalDays,
+            totalTrades,
+            elapsedMs,
+            phase,
+            coverage: latestCoverage,
+            hydration,
+            replay
           });
         }
       });
@@ -115,6 +199,7 @@ export class BacktestJobService {
         current_marker: 'Completed',
         progress_json: JSON.stringify({
           phase: 'completed',
+          coverage: latestCoverage,
           hydration: null,
           replay: null
         }),
@@ -131,6 +216,7 @@ export class BacktestJobService {
           current_marker: 'Failed',
           progress_json: JSON.stringify({
             phase: 'failed',
+            coverage: latestCoverage,
             hydration: null,
             replay: null
           })
@@ -151,6 +237,7 @@ export class BacktestJobService {
       current_marker: 'Cancelled by operator',
       progress_json: JSON.stringify({
         phase: 'cancelled',
+        coverage: null,
         hydration: null,
         replay: null
       })
@@ -169,4 +256,12 @@ function computeDayCount(startDate, endDate) {
   const startMs = Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate());
   const endMs = Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate());
   return Math.floor((endMs - startMs) / 86400000) + 1;
+}
+
+function summarizeCoveragePlan(days = []) {
+  const counts = new Map();
+  for (const day of days) {
+    counts.set(day.classification, (counts.get(day.classification) || 0) + 1);
+  }
+  return [...counts.entries()].map(([classification, count]) => ({ classification, count }));
 }

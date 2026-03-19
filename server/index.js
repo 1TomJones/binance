@@ -612,24 +612,27 @@ function buildStrategyCatalog() {
   return { builtIn, uploaded };
 }
 
+const historicalBacktestDataService = new HistoricalBacktestDataService({
+  getHistoricalCoverage: (symbol, dayStartMs) => getHistoricalTradeCoverage(symbol, dayStartMs),
+  saveHistoricalCoverage: (record) => saveHistoricalTradeCoverage(record),
+  loadTradesByRange: (symbol, startMs, endMs, limit) => getTradesByRange(symbol, startMs, endMs, limit),
+  loadLatestTradeBefore: (symbol, beforeMs) => getLatestTradeBefore(symbol, beforeMs),
+  loadLatestTradeInRange: (symbol, startMs, endMs) => getLatestTradeInRange(symbol, startMs, endMs),
+  getTradeStatsByRange: (symbol, startMs, endMs) => getTradeStatsByRange(symbol, startMs, endMs),
+  saveTradesBatch: (trades) => saveTradesBatch(trades),
+  streamTradesByRange: (symbol, startMs, endMs, chunkSize) => streamTradesByRange(symbol, startMs, endMs, chunkSize)
+});
+
 const backtestRunner = new BacktestRunner({
   executionEngine,
-  historicalDataService: new HistoricalBacktestDataService({
-    getHistoricalCoverage: (symbol, dayStartMs) => getHistoricalTradeCoverage(symbol, dayStartMs),
-    saveHistoricalCoverage: (record) => saveHistoricalTradeCoverage(record),
-    loadTradesByRange: (symbol, startMs, endMs, limit) => getTradesByRange(symbol, startMs, endMs, limit),
-    loadLatestTradeBefore: (symbol, beforeMs) => getLatestTradeBefore(symbol, beforeMs),
-    loadLatestTradeInRange: (symbol, startMs, endMs) => getLatestTradeInRange(symbol, startMs, endMs),
-    getTradeStatsByRange: (symbol, startMs, endMs) => getTradeStatsByRange(symbol, startMs, endMs),
-    saveTradesBatch: (trades) => saveTradesBatch(trades),
-    streamTradesByRange: (symbol, startMs, endMs, chunkSize) => streamTradesByRange(symbol, startMs, endMs, chunkSize)
-  }),
+  historicalDataService: historicalBacktestDataService,
   loadTrades: ({ symbol, startMs, endMs, limit }) => getTradesByRange(symbol, startMs, endMs, limit),
   loadSeedTrade: ({ symbol, beforeMs }) => getLatestTradeBefore(symbol, beforeMs)
 });
 
 const backtestJobService = new BacktestJobService({
   backtestRunner,
+  historicalDataService: historicalBacktestDataService,
   resolveStrategy,
   createJob: createQuantBacktestJob,
   updateJob: updateQuantBacktestJob,
