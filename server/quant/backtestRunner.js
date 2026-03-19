@@ -1,3 +1,4 @@
+import { HistoricalCoverageError } from './historicalBacktestDataService.js';
 import { HistoricalMarketReplay } from './historicalMarketReplay.js';
 import { timeframeToSeconds } from '../sessionAnalytics.js';
 
@@ -12,11 +13,12 @@ export class BacktestRunner {
     this.historicalDataService = historicalDataService;
   }
 
-  async run({ strategy, runConfig, progressCallback, shouldStop }) {
+  async run({ strategy, runConfig, progressCallback, shouldStop, coveragePlan = null }) {
     const startDate = normalizeDay(runConfig.startDate);
     const endDate = normalizeDay(runConfig.endDate || runConfig.startDate);
+    const replayDays = coveragePlan?.days?.length ? coveragePlan.days : [...iterateUtcDays(startDate, endDate)].map((day) => ({ ...day, targetEndMs: day.dayEndMs }));
     const runState = this.executionEngine.createRunState({ strategy, runConfig });
-    const totalDays = daysBetweenInclusive(startDate, endDate);
+    const totalDays = replayDays.length;
     const timeframeSec = timeframeToSeconds(strategy.market?.timeframe || '1m');
     const candlesPerDay = Math.floor(86400 / timeframeSec);
     const totalCandlesTarget = Math.max(totalDays * candlesPerDay, 1);
@@ -26,15 +28,13 @@ export class BacktestRunner {
     let processedCandles = 0;
     let emittedSinceProgress = 0;
     let emittedSinceYield = 0;
-    let lastHydrationState = null;
 
     const emitProgress = ({
       currentDate,
       currentDay,
       stage,
-      phase = 'replay',
-      hydration = lastHydrationState,
       replay = null,
+      hydration = null,
       progressPct = null
     }) => {
       progressCallback?.({
@@ -42,44 +42,37 @@ export class BacktestRunner {
         total: totalCandlesTarget,
         progressPct: Number.isFinite(Number(progressPct))
           ? Number(progressPct)
-          : computeOverallProgressPct({
-              currentDay,
-              totalDays,
-              phase,
-              hydrationPercent: hydration?.percent,
-              replayPercent: replay?.percent
-            }),
+          : computeReplayProgressPct({ currentDay, totalDays, replayPercent: replay?.percent }),
         currentDate,
         currentDay,
         totalDays,
         totalTrades: runState.trades.length,
         elapsedMs: Date.now() - startedAtMs,
         marker: stage,
-        phase,
+        phase: 'replaying',
         hydration,
         replay
       });
     };
 
-    for (const { dayStartMs, dayEndMs, isoDate, dayIndex } of iterateUtcDays(startDate, endDate)) {
+    for (const day of replayDays) {
       shouldStop?.();
-      lastHydrationState = {
-        day: isoDate,
-        status: 'pending',
-        source: null,
-        rowsIngested: 0,
-        pagesIngested: 0,
-        checkpointTimeMs: null,
-        lastAggTradeId: null,
-        retry: null,
-        percent: 0
-      };
+      const { dayStartMs, dayEndMs, isoDate, dayIndex = 0, targetEndMs = day.dayEndMs } = day;
+
       emitProgress({
         currentDate: isoDate,
         currentDay: dayIndex + 1,
-        stage: 'Loading session history',
-        phase: 'hydration',
-        hydration: lastHydrationState,
+        stage: 'Loading prepared local historical session',
+        hydration: {
+          source: day.coverage?.source || null,
+          status: 'complete',
+          rowsIngested: Number(day.coverage?.checkpoint_rows || day.coverage?.trade_count || 0),
+          pagesIngested: day.coverage?.source === 'bulk-file' ? 1 : 0,
+          checkpointTimeMs: day.coverage?.checkpoint_time_ms ?? targetEndMs,
+          lastAggTradeId: day.coverage?.last_agg_trade_id ?? null,
+          retry: null,
+          percent: 100
+        },
         replay: {
           day: isoDate,
           status: 'pending',
@@ -91,62 +84,34 @@ export class BacktestRunner {
         }
       });
 
-      const dayPayload = this.historicalDataService
-        ? await this.historicalDataService.loadDay({
-            symbol: strategy.market.symbol,
-            dayStartMs,
-            dayEndMs,
-            shouldStop,
-            progressCallback: (payload = {}) => {
-              lastHydrationState = {
-                ...lastHydrationState,
-                ...(payload.hydration || {}),
-                day: isoDate
-              };
-              emitProgress({
-                currentDate: isoDate,
-                currentDay: dayIndex + 1,
-                stage: payload.stage,
-                phase: payload.phase || 'hydration',
-                hydration: lastHydrationState,
-                replay: {
-                  day: isoDate,
-                  status: 'pending',
-                  replayedTrades: 0,
-                  totalTrades: Number(payload.tradeCount || 0),
-                  processedCandles,
-                  totalCandlesTarget,
-                  percent: totalCandlesTarget ? (processedCandles / totalCandlesTarget) * 100 : 0
-                },
-                progressPct: payload.progressPct
-              });
-            }
-          })
-        : {
-            trades: this.loadTrades({
-              symbol: strategy.market.symbol,
-              startMs: dayStartMs,
-              endMs: dayEndMs,
-              limit: null
-            }),
-            seedTrade: this.loadSeedTrade?.({
-              symbol: strategy.market.symbol,
-              beforeMs: dayStartMs
-            }) || null
-          };
+      const dayPayload = await this.#loadReplayDay({
+        strategy,
+        day,
+        shouldStop,
+        progressCallback: (payload = {}) => {
+          emitProgress({
+            currentDate: isoDate,
+            currentDay: dayIndex + 1,
+            stage: payload.stage || 'Loading prepared local historical session',
+            hydration: payload.hydration || null,
+            replay: {
+              day: isoDate,
+              status: 'pending',
+              replayedTrades: 0,
+              totalTrades: Number(payload.tradeCount || 0),
+              processedCandles,
+              totalCandlesTarget,
+              percent: totalCandlesTarget ? (processedCandles / totalCandlesTarget) * 100 : 0
+            },
+            progressPct: payload.progressPct
+          });
+        },
+        targetEndMs
+      });
 
       const tradeSource = dayPayload.tradeStream || dayPayload.trades || [];
       const seedTrade = dayPayload.seedTrade || null;
       const totalDayTrades = Math.max(Number(dayPayload.tradeCount ?? (Array.isArray(tradeSource) ? tradeSource.length : 0)) || 0, 1);
-      lastHydrationState = {
-        ...lastHydrationState,
-        status: 'complete',
-        percent: 100,
-        source: dayPayload.hydrationSource || lastHydrationState?.source || null,
-        checkpointTimeMs: dayPayload.targetEndMs || lastHydrationState?.checkpointTimeMs || null,
-        lastAggTradeId: dayPayload.lastAggTradeId || lastHydrationState?.lastAggTradeId || null,
-        totalTrades: totalDayTrades
-      };
 
       const sessionReplay = new HistoricalMarketReplay({
         timeframe: strategy.market.timeframe,
@@ -221,8 +186,16 @@ export class BacktestRunner {
         currentDate: isoDate,
         currentDay: dayIndex + 1,
         stage: flattenedTrade ? 'Session flattened at UTC close' : 'Session complete',
-        phase: 'replay',
-        hydration: lastHydrationState,
+        hydration: {
+          source: dayPayload.hydrationSource || day.coverage?.source || null,
+          status: 'complete',
+          rowsIngested: Number(day.coverage?.checkpoint_rows || dayPayload.tradeCount || 0),
+          pagesIngested: dayPayload.hydrationSource === 'bulk-file' ? 1 : 0,
+          checkpointTimeMs: day.coverage?.checkpoint_time_ms ?? targetEndMs,
+          lastAggTradeId: dayPayload.lastAggTradeId || day.coverage?.last_agg_trade_id || null,
+          retry: null,
+          percent: 100
+        },
         replay: {
           day: isoDate,
           status: 'complete',
@@ -237,6 +210,21 @@ export class BacktestRunner {
       await yieldToEventLoop();
     }
 
+    progressCallback?.({
+      processed: processedCandles,
+      total: totalCandlesTarget,
+      progressPct: 95,
+      currentDate: replayDays.at(-1)?.isoDate || null,
+      currentDay: totalDays || null,
+      totalDays,
+      totalTrades: runState.trades.length,
+      elapsedMs: Date.now() - startedAtMs,
+      marker: 'Finalizing results',
+      phase: 'finalizing',
+      hydration: null,
+      replay: null
+    });
+
     const result = this.executionEngine.finalizeRun({
       strategy,
       state: runState,
@@ -248,6 +236,47 @@ export class BacktestRunner {
       analyses: this.executionEngine.metricsCalculator.buildAnalyses({ trades: runState.trades, sessionResults }),
       sessionResults
     };
+  }
+
+  async #loadReplayDay({ strategy, day, shouldStop, progressCallback, targetEndMs }) {
+    if (this.historicalDataService?.loadPreparedDay && (day.coverage != null || day.classification != null)) {
+      return this.historicalDataService.loadPreparedDay({
+        symbol: strategy.market.symbol,
+        dayStartMs: day.dayStartMs,
+        dayEndMs: day.dayEndMs,
+        targetEndMs,
+        shouldStop,
+        progressCallback,
+        coveragePlanEntry: day
+      });
+    }
+
+    if (this.historicalDataService?.loadDay) {
+      return this.historicalDataService.loadDay({
+        symbol: strategy.market.symbol,
+        dayStartMs: day.dayStartMs,
+        dayEndMs: day.dayEndMs,
+        shouldStop,
+        progressCallback
+      });
+    }
+
+    const trades = this.loadTrades({
+      symbol: strategy.market.symbol,
+      startMs: day.dayStartMs,
+      endMs: targetEndMs,
+      limit: null
+    });
+    const seedTrade = this.loadSeedTrade?.({
+      symbol: strategy.market.symbol,
+      beforeMs: day.dayStartMs
+    }) || null;
+
+    if (!trades) {
+      throw new HistoricalCoverageError(`Historical trade coverage is not ready for ${strategy.market.symbol} on ${day.isoDate}.`);
+    }
+
+    return { trades, seedTrade };
   }
 
   async #drainCandles({
@@ -287,7 +316,6 @@ export class BacktestRunner {
           currentDate,
           currentDay,
           stage: progressStage,
-          phase: 'replay',
           replay: {
             day: currentDate,
             status: 'running',
@@ -311,22 +339,12 @@ export class BacktestRunner {
   }
 }
 
-function computeOverallProgressPct({ currentDay, totalDays, phase, hydrationPercent, replayPercent }) {
+function computeReplayProgressPct({ currentDay, totalDays, replayPercent }) {
   const safeCurrentDay = Math.max(Number(currentDay) || 1, 1);
   const safeTotalDays = Math.max(Number(totalDays) || 1, 1);
   const completedDays = Math.min(safeCurrentDay - 1, safeTotalDays);
-  const hydrationRatio = clampRatio((Number(hydrationPercent) || 0) / 100);
   const replayRatio = clampRatio((Number(replayPercent) || 0) / 100);
-
-  let dayRatio = replayRatio;
-  if (phase === 'hydration') {
-    dayRatio = hydrationRatio * 0.4;
-  } else if (phase === 'replay') {
-    dayRatio = 0.4 + (replayRatio * 0.6);
-  } else if (phase === 'completed') {
-    dayRatio = 1;
-  }
-
+  const dayRatio = 0.5 + (replayRatio * 0.45);
   return ((completedDays + clampRatio(dayRatio)) / safeTotalDays) * 100;
 }
 
@@ -377,10 +395,6 @@ function* iterateUtcDays(startDate, endDate) {
   }
 }
 
-function daysBetweenInclusive(startDate, endDate) {
-  return Math.floor((endDate.getTime() - startDate.getTime()) / 86400000) + 1;
-}
-
 function round(value) {
   return Number((value || 0).toFixed(4));
 }
@@ -388,7 +402,6 @@ function round(value) {
 function yieldToEventLoop() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
-
 
 async function* iterateTrades(tradeSource) {
   if (!tradeSource) return;
