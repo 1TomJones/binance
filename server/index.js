@@ -10,6 +10,7 @@ import {
   createQuantBacktestJob,
   failQuantBacktestJob,
   getLatestBook,
+  getLatestTradeBefore,
   getQuantBacktestJobById,
   getQuantResultByJobId,
   getRecentTrades,
@@ -606,7 +607,8 @@ function buildStrategyCatalog() {
 
 const backtestRunner = new BacktestRunner({
   executionEngine,
-  loadTrades: ({ symbol, startMs, endMs, limit }) => getTradesByRange(symbol, startMs, endMs, limit)
+  loadTrades: ({ symbol, startMs, endMs, limit }) => getTradesByRange(symbol, startMs, endMs, limit),
+  loadSeedTrade: ({ symbol, beforeMs }) => getLatestTradeBefore(symbol, beforeMs)
 });
 
 const backtestJobService = new BacktestJobService({

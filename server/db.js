@@ -50,6 +50,10 @@ db.exec(`
     progress_pct INTEGER NOT NULL DEFAULT 0,
     processed_items INTEGER NOT NULL DEFAULT 0,
     current_marker TEXT,
+    current_date TEXT,
+    current_day INTEGER,
+    total_days INTEGER,
+    closed_trade_count INTEGER NOT NULL DEFAULT 0,
     elapsed_ms INTEGER,
     run_config_json TEXT,
     result_id INTEGER,
@@ -67,8 +71,6 @@ db.exec(`
     created_at INTEGER NOT NULL
   );
 
-
-
   CREATE TABLE IF NOT EXISTS quant_live_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     strategy_id INTEGER NOT NULL UNIQUE,
@@ -84,10 +86,23 @@ db.exec(`
     progress_pct INTEGER NOT NULL,
     processed_items INTEGER,
     current_marker TEXT,
+    current_date TEXT,
+    current_day INTEGER,
+    total_days INTEGER,
+    closed_trade_count INTEGER,
     elapsed_ms INTEGER,
     ts INTEGER NOT NULL
   );
 `);
+
+ensureColumn('quant_backtest_jobs', 'current_date', 'TEXT');
+ensureColumn('quant_backtest_jobs', 'current_day', 'INTEGER');
+ensureColumn('quant_backtest_jobs', 'total_days', 'INTEGER');
+ensureColumn('quant_backtest_jobs', 'closed_trade_count', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('quant_job_progress', 'current_date', 'TEXT');
+ensureColumn('quant_job_progress', 'current_day', 'INTEGER');
+ensureColumn('quant_job_progress', 'total_days', 'INTEGER');
+ensureColumn('quant_job_progress', 'closed_trade_count', 'INTEGER');
 
 const insertTradeStmt = db.prepare(`
   INSERT OR IGNORE INTO trades (
@@ -116,9 +131,9 @@ const insertStrategyStmt = db.prepare(`
 
 const createJobStmt = db.prepare(`
   INSERT INTO quant_backtest_jobs (
-    strategy_id, status, progress_pct, processed_items, current_marker, run_config_json, created_at, updated_at
+    strategy_id, status, progress_pct, processed_items, current_marker, current_date, current_day, total_days, closed_trade_count, run_config_json, created_at, updated_at
   ) VALUES (
-    @strategy_id, 'queued', 0, 0, 'Queued', @run_config_json, @created_at, @updated_at
+    @strategy_id, 'queued', 0, 0, 'Queued', NULL, NULL, NULL, 0, @run_config_json, @created_at, @updated_at
   )
 `);
 
@@ -128,6 +143,10 @@ const updateJobStmt = db.prepare(`
       progress_pct = COALESCE(@progress_pct, progress_pct),
       processed_items = COALESCE(@processed_items, processed_items),
       current_marker = COALESCE(@current_marker, current_marker),
+      current_date = COALESCE(@current_date, current_date),
+      current_day = COALESCE(@current_day, current_day),
+      total_days = COALESCE(@total_days, total_days),
+      closed_trade_count = COALESCE(@closed_trade_count, closed_trade_count),
       elapsed_ms = COALESCE(@elapsed_ms, elapsed_ms),
       result_id = COALESCE(@result_id, result_id),
       error_message = COALESCE(@error_message, error_message),
@@ -141,8 +160,11 @@ const insertResultStmt = db.prepare(`
 `);
 
 const insertProgressStmt = db.prepare(`
-  INSERT INTO quant_job_progress (job_id, status, progress_pct, processed_items, current_marker, elapsed_ms, ts)
-  VALUES (@job_id, @status, @progress_pct, @processed_items, @current_marker, @elapsed_ms, @ts)
+  INSERT INTO quant_job_progress (
+    job_id, status, progress_pct, processed_items, current_marker, current_date, current_day, total_days, closed_trade_count, elapsed_ms, ts
+  ) VALUES (
+    @job_id, @status, @progress_pct, @processed_items, @current_marker, @current_date, @current_day, @total_days, @closed_trade_count, @elapsed_ms, @ts
+  )
 `);
 
 const upsertLiveRunStmt = db.prepare(`
@@ -159,10 +181,20 @@ const QUANT_BACKTEST_JOB_UPDATE_DEFAULTS = Object.freeze({
   progress_pct: null,
   processed_items: null,
   current_marker: null,
+  current_date: null,
+  current_day: null,
+  total_days: null,
+  closed_trade_count: null,
   elapsed_ms: null,
   result_id: null,
   error_message: null
 });
+
+function ensureColumn(tableName, columnName, columnDefinition) {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  if (columns.some((column) => column.name === columnName)) return;
+  db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition}`);
+}
 
 function normalizeQuantBacktestJobPatch(patch = {}) {
   return {
@@ -231,6 +263,17 @@ export function getTradesByRange(symbol, start, end, limit = 20000) {
   `).all(symbol, start, end, limit);
 }
 
+export function getLatestTradeBefore(symbol, beforeMs) {
+  return db.prepare(`
+    SELECT trade_id, symbol, price, quantity, trade_time, maker_flag, side, ingest_ts
+    FROM trades
+    WHERE symbol = ?
+      AND trade_time < ?
+    ORDER BY trade_time DESC
+    LIMIT 1
+  `).get(symbol, beforeMs);
+}
+
 export function getLatestBook(symbol) {
   return db.prepare(`
     SELECT symbol, bid_price, bid_qty, ask_price, ask_qty, ts
@@ -269,6 +312,10 @@ export function createQuantBacktestJob(record) {
     progress_pct: job.progress_pct,
     processed_items: job.processed_items,
     current_marker: job.current_marker,
+    current_date: job.current_date,
+    current_day: job.current_day,
+    total_days: job.total_days,
+    closed_trade_count: job.closed_trade_count,
     elapsed_ms: job.elapsed_ms || 0
   });
   return job;
@@ -285,6 +332,10 @@ export function updateQuantBacktestJob(id, patch = {}) {
     progress_pct: job.progress_pct,
     processed_items: job.processed_items,
     current_marker: job.current_marker,
+    current_date: job.current_date,
+    current_day: job.current_day,
+    total_days: job.total_days,
+    closed_trade_count: job.closed_trade_count,
     elapsed_ms: job.elapsed_ms || 0
   });
   return job;
@@ -303,6 +354,10 @@ export function failQuantBacktestJob(id, errorOrMessage, patch = {}) {
   return updateQuantBacktestJob(id, {
     progress_pct: existingJob?.progress_pct ?? 0,
     processed_items: existingJob?.processed_items ?? 0,
+    current_date: existingJob?.current_date ?? null,
+    current_day: existingJob?.current_day ?? null,
+    total_days: existingJob?.total_days ?? null,
+    closed_trade_count: existingJob?.closed_trade_count ?? 0,
     elapsed_ms: existingJob?.elapsed_ms ?? null,
     status: 'failed',
     error_message: errorMessage,
@@ -350,7 +405,6 @@ export function listQuantJobProgress(jobId) {
     ORDER BY ts ASC
   `).all(jobId);
 }
-
 
 export function saveQuantLiveRun({ strategyId, status, stateJson }) {
   upsertLiveRunStmt.run({ strategy_id: strategyId, status, state_json: stateJson, updated_at: Date.now() });
