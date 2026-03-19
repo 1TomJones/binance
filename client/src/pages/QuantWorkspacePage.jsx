@@ -64,6 +64,7 @@ export function QuantWorkspacePage() {
         setLiveSnapshot(livePayload.snapshot || null);
         setBacktestSnapshot(backtestPayload.snapshot || null);
         setSpeeds(backtestPayload.speeds || DEFAULT_SPEEDS);
+        if (backtestPayload.suggestedConfig) setBacktestConfig(backtestPayload.suggestedConfig);
         setSettings((prev) => ({ ...prev, ...(livePayload.snapshot?.controls || {}) }));
       } catch (loadError) {
         if (mounted) setErrorMessage(loadError.message);
@@ -223,6 +224,13 @@ export function QuantWorkspacePage() {
       });
       setBacktestSnapshot(payload.snapshot || null);
       setSpeeds(payload.speeds || DEFAULT_SPEEDS);
+      if (payload.normalizedRange) {
+        setBacktestConfig((prev) => ({
+          ...prev,
+          startDate: payload.normalizedRange.startDate || prev.startDate,
+          endDate: payload.normalizedRange.endDate || prev.endDate
+        }));
+      }
       setActiveMode('backtest');
       setAnalysisView('timeOfDay');
     } catch (startError) {

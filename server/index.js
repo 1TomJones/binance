@@ -30,6 +30,7 @@ import {
   aggregateCandles,
   getUtcDayStartMs,
 } from './sessionAnalytics.js';
+import { deriveSuggestedBacktestRange, normalizeBacktestDateRange } from './marketTime.js';
 
 const PORT = process.env.PORT || 3000;
 const SYMBOL = 'BTCUSDT';
@@ -83,13 +84,50 @@ function createSessionState(dayStartMs) {
 }
 
 let sessionState = createSessionState(getUtcDayStartMs());
+let sessionInitializationPromise = null;
+let sessionInitializationTimer = null;
+const SESSION_INITIALIZATION_RETRY_MS = 30_000;
+const MARKET_CONTEXT_TTL_MS = 60_000;
+const BACKTEST_DEFAULT_LOOKBACK_DAYS = 5;
+const marketContext = {
+  fetchedAt: 0,
+  latestCandleOpenMs: null
+};
 
-function ensureCurrentSession(nowMs = Date.now()) {
+function recordMarketTimestamp(timestampMs) {
+  if (!Number.isFinite(timestampMs)) return;
+  if (!Number.isFinite(marketContext.latestCandleOpenMs) || timestampMs > marketContext.latestCandleOpenMs) {
+    marketContext.latestCandleOpenMs = timestampMs;
+  }
+}
+
+function getEffectiveMarketNowMs() {
+  if (Number.isFinite(latestTrade?.trade_time)) return latestTrade.trade_time;
+  if (Number.isFinite(marketContext.latestCandleOpenMs)) return marketContext.latestCandleOpenMs + 59_000;
+  return Date.now();
+}
+
+function scheduleSessionInitialization({ reason = 'scheduled', delayMs = 0, targetNowMs } = {}) {
+  clearTimeout(sessionInitializationTimer);
+  sessionInitializationTimer = setTimeout(() => {
+    sessionInitializationTimer = null;
+    void initializeCurrentSessionSafe({ reason, targetNowMs });
+  }, Math.max(0, delayMs));
+}
+
+function ensureCurrentSession(nowMs = getEffectiveMarketNowMs()) {
   const currentDayStart = getUtcDayStartMs(nowMs);
   if (sessionState.dayStartMs !== currentDayStart) {
     sessionState = createSessionState(currentDayStart);
     console.info('[session] rolled to new UTC day', { dayStartIso: new Date(currentDayStart).toISOString() });
+    scheduleSessionInitialization({ reason: 'utc-day-rollover', delayMs: 0, targetNowMs: nowMs });
   }
+}
+
+function mergeVolumeProfileIntoSession(candles = []) {
+  buildVolumeProfileFromCandles(candles).forEach(({ price, volume }) => {
+    sessionState.volumeProfile.set(price, (sessionState.volumeProfile.get(price) || 0) + Number(volume || 0));
+  });
 }
 
 
@@ -281,6 +319,67 @@ async function fetchBinanceWithFallback(endpointPath, search, { timeoutMs = 1000
   );
 }
 
+async function fetchLatestAvailableCandle({ symbol = SYMBOL, interval = '1m', force = false } = {}) {
+  if (!force && Number.isFinite(marketContext.latestCandleOpenMs) && (Date.now() - marketContext.fetchedAt) < MARKET_CONTEXT_TTL_MS) {
+    return { time: Math.floor(marketContext.latestCandleOpenMs / 1000) };
+  }
+
+  const search = new URLSearchParams({
+    symbol,
+    interval,
+    limit: '1'
+  });
+
+  const { payload } = await fetchBinanceWithFallback('/klines', search, {
+    context: 'market-context/latest-candle'
+  });
+
+  if (!Array.isArray(payload) || !payload.length) {
+    throw new Error('Binance returned no candles for the latest candle context request.');
+  }
+
+  const latestCandle = normalizeKline(payload[0]);
+
+  marketContext.fetchedAt = Date.now();
+  marketContext.latestCandleOpenMs = latestCandle.time * 1000;
+  return latestCandle;
+}
+
+async function buildSuggestedBacktestConfig() {
+  try {
+    const latestCandle = await fetchLatestAvailableCandle();
+    return deriveSuggestedBacktestRange({
+      latestCandleOpenMs: latestCandle.time * 1000,
+      lookbackDays: BACKTEST_DEFAULT_LOOKBACK_DAYS
+    });
+  } catch (_error) {
+    const fallbackNowMs = getEffectiveMarketNowMs();
+    return deriveSuggestedBacktestRange({
+      latestCandleOpenMs: Math.max(sessionState.minuteCandles.at(-1)?.time * 1000 || 0, fallbackNowMs - 60_000),
+      lookbackDays: BACKTEST_DEFAULT_LOOKBACK_DAYS
+    });
+  }
+}
+
+async function normalizeBacktestRequestRange({ startDate, endDate }) {
+  try {
+    const latestCandle = await fetchLatestAvailableCandle();
+    return normalizeBacktestDateRange({
+      startDate,
+      endDate,
+      latestCandleOpenMs: latestCandle.time * 1000,
+      lookbackDays: BACKTEST_DEFAULT_LOOKBACK_DAYS
+    });
+  } catch (_error) {
+    return normalizeBacktestDateRange({
+      startDate,
+      endDate,
+      latestCandleOpenMs: sessionState.minuteCandles.at(-1)?.time * 1000 || null,
+      lookbackDays: BACKTEST_DEFAULT_LOOKBACK_DAYS
+    });
+  }
+}
+
 function buildTimeScaffold(timeframe, sessionStartMs, nowMs) {
   const tfSeconds = { '1m': 60, '5m': 300, '15m': 900, '1h': 3600 }[timeframe] || 60;
   const startSec = Math.floor(sessionStartMs / 1000 / tfSeconds) * tfSeconds;
@@ -441,11 +540,7 @@ async function backfillCurrentSessionCandlesFromBinance(dayStartMs, nowMs) {
   return collected;
 }
 
-async function initializeCurrentSession() {
-  const nowMs = Date.now();
-  const dayStartMs = getUtcDayStartMs(nowMs);
-  ensureCurrentSession(nowMs);
-
+async function initializeCurrentSession({ reason = 'startup', targetNowMs } = {}) {
   sessionState.hydration = {
     ...sessionState.hydration,
     status: 'running',
@@ -455,13 +550,18 @@ async function initializeCurrentSession() {
     lastError: null
   };
 
-  console.info('Starting candle backfill', { dayStartIso: new Date(dayStartMs).toISOString() });
-  const backfilledCandles = await backfillCurrentSessionCandlesFromBinance(dayStartMs, nowMs);
+  const latestCandle = await fetchLatestAvailableCandle();
+  const marketNowMs = Number.isFinite(targetNowMs) ? targetNowMs : (latestCandle.time * 1000) + 59_000;
+  const dayStartMs = getUtcDayStartMs(marketNowMs);
+  recordMarketTimestamp(latestCandle.time * 1000);
+  ensureCurrentSession(marketNowMs);
+
+  console.info('Starting candle backfill', { reason, dayStartIso: new Date(dayStartMs).toISOString() });
+  const backfilledCandles = await backfillCurrentSessionCandlesFromBinance(dayStartMs, marketNowMs);
   const mergedCandleCount = mergeMinuteCandlesIntoSession(backfilledCandles);
   const mergedCvdCount = mergeCvdMinuteCandlesIntoSession(buildCvdMinuteCandlesFromKlines(backfilledCandles));
-  sessionState.volumeProfile = new Map(
-    buildVolumeProfileFromCandles(backfilledCandles).map(({ price, volume }) => [price, volume])
-  );
+  sessionState.volumeProfile = new Map();
+  mergeVolumeProfileIntoSession(backfilledCandles);
 
   sessionState.hydration = {
     ...sessionState.hydration,
@@ -478,6 +578,7 @@ async function initializeCurrentSession() {
   const flushedTradeCount = flushPendingDerivedTrades();
 
   console.info('[session/hydration] complete', {
+    reason,
     dayStartIso: new Date(dayStartMs).toISOString(),
     fetchedCandleCount: backfilledCandles.length,
     fetchedTradeCount: 0,
@@ -491,30 +592,40 @@ async function initializeCurrentSession() {
   });
 }
 
-async function initializeCurrentSessionSafe() {
-  try {
-    await initializeCurrentSession();
-    console.log('Current session initialized.');
-  } catch (error) {
-    sessionState.hydration = {
-      ...sessionState.hydration,
-      status: 'failed',
-      finishedAt: Date.now(),
-      lastError: error?.message || String(error)
-    };
-    const queuedTradeCount = sessionState.pendingDerivedTrades.length;
-    const flushedTradeCount = flushPendingDerivedTrades();
-    console.warn('[session/hydration] flushed queued live trades after failure', {
-      queuedTradeCount,
-      flushedTradeCount
-    });
-    console.error('Session initialization failed; continuing with live streams.', error);
-  }
+async function initializeCurrentSessionSafe({ reason = 'startup', targetNowMs } = {}) {
+  if (sessionInitializationPromise) return sessionInitializationPromise;
+
+  sessionInitializationPromise = (async () => {
+    try {
+      await initializeCurrentSession({ reason, targetNowMs });
+      console.log('Current session initialized.');
+    } catch (error) {
+      sessionState.hydration = {
+        ...sessionState.hydration,
+        status: 'failed',
+        finishedAt: Date.now(),
+        lastError: error?.message || String(error)
+      };
+      const queuedTradeCount = sessionState.pendingDerivedTrades.length;
+      const flushedTradeCount = flushPendingDerivedTrades();
+      console.warn('[session/hydration] flushed queued live trades after failure', {
+        reason,
+        queuedTradeCount,
+        flushedTradeCount
+      });
+      console.error('Session initialization failed; continuing with live streams.', error);
+      scheduleSessionInitialization({ reason: 'retry-after-failure', delayMs: SESSION_INITIALIZATION_RETRY_MS });
+    } finally {
+      sessionInitializationPromise = null;
+    }
+  })();
+
+  return sessionInitializationPromise;
 }
 
 function buildSessionPayload(timeframe = '1m') {
   ensureCurrentSession();
-  const nowMs = Date.now();
+  const nowMs = getEffectiveMarketNowMs();
   const minuteCandles = [...sessionState.minuteCandles];
   const hydratedCandles = aggregateCandles(minuteCandles, timeframe);
   const scaffold = buildTimeScaffold(timeframe, sessionState.dayStartMs, nowMs);
@@ -646,12 +757,14 @@ function buildLiveMarketSnapshot() {
 
   const nowMinuteSec = Math.floor(Date.now() / 60000) * 60;
   const closedCandles = candles.filter((candle) => candle.time < nowMinuteSec);
-  const markPrice = Number(latestTrade?.price || latestBook?.bidPrice || latestBook?.askPrice || candles.at(-1)?.close || 0) || null;
+  const latestBid = Number(latestBook?.bid_price ?? latestBook?.bidPrice ?? 0) || null;
+  const latestAsk = Number(latestBook?.ask_price ?? latestBook?.askPrice ?? 0) || null;
+  const markPrice = Number(latestTrade?.price || latestBid || latestAsk || candles.at(-1)?.close || 0) || null;
 
   return {
     symbol: SYMBOL,
-    bestBid: latestBook?.bidPrice ? Number(latestBook.bidPrice) : null,
-    bestAsk: latestBook?.askPrice ? Number(latestBook.askPrice) : null,
+    bestBid: latestBid,
+    bestAsk: latestAsk,
     markPrice,
     lastClose: candles.at(-1)?.close ? Number(candles.at(-1).close) : null,
     analysis: {
@@ -700,7 +813,17 @@ const stream = new BinanceStreamService({
     latestDepth = depth;
     io.emit('depth', depth);
   },
+  onCandleBootstrap: (candles) => {
+    if (!candles?.length) return;
+    const lastBootstrapCandle = candles.at(-1);
+    recordMarketTimestamp(lastBootstrapCandle.time * 1000);
+    ensureCurrentSession(lastBootstrapCandle.time * 1000);
+    mergeMinuteCandlesIntoSession(candles.map((candle) => ({ ...candle, hasTrades: true, isPlaceholder: false })));
+    mergeCvdMinuteCandlesIntoSession(buildCvdMinuteCandlesFromKlines(candles));
+    mergeVolumeProfileIntoSession(candles);
+  },
   onCandle: (candle) => {
+    recordMarketTimestamp(candle.time * 1000);
     ensureCurrentSession(candle.time * 1000);
     mergeMinuteCandlesIntoSession([{ ...candle, hasTrades: true, isPlaceholder: false }]);
   },
@@ -766,31 +889,40 @@ app.get('/api/quant/live/strategies', (_req, res) => {
   });
 });
 
-app.get('/api/quant/backtest/snapshot', (_req, res) => {
+app.get('/api/quant/backtest/snapshot', async (_req, res) => {
   try {
     return res.json({
       snapshot: backtestRunner.getSnapshot(),
       speeds: Object.values(BACKTEST_SPEEDS),
-      limits: LIVE_PAPER_LIMITS
+      limits: LIVE_PAPER_LIMITS,
+      suggestedConfig: await buildSuggestedBacktestConfig()
     });
   } catch (error) {
     return res.status(500).json({ error: error.message || 'Unable to load backtest snapshot.' });
   }
 });
 
-app.post('/api/quant/backtest/start', (req, res) => {
+app.post('/api/quant/backtest/start', async (req, res) => {
   try {
     const { strategyRef, runConfig, startDate, endDate, speed } = req.body || {};
     if (!strategyRef) return res.status(400).json({ error: 'strategyRef is required.' });
     if (!startDate || !endDate) return res.status(400).json({ error: 'startDate and endDate are required.' });
+
+    const normalizedRange = await normalizeBacktestRequestRange({ startDate, endDate });
     const snapshot = backtestRunner.start({
       strategyRef,
       runConfig: runConfig || {},
-      startDate,
-      endDate,
+      startDate: normalizedRange.startDate,
+      endDate: normalizedRange.endDate,
       speed
     });
-    return res.json({ snapshot, speeds: Object.values(BACKTEST_SPEEDS), limits: LIVE_PAPER_LIMITS });
+
+    return res.json({
+      snapshot,
+      speeds: Object.values(BACKTEST_SPEEDS),
+      limits: LIVE_PAPER_LIMITS,
+      normalizedRange
+    });
   } catch (error) {
     return res.status(400).json({ error: error.message || 'Unable to start backtest.' });
   }
