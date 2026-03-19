@@ -98,3 +98,29 @@ test('default backtest range prefers completed UTC days only and excludes today'
   assert.equal(rangeIncludesCurrentUtcDay(defaults.defaultStartDate, defaults.defaultEndDate, new Date('2026-03-19T12:00:00.000Z')), false);
   assert.equal(rangeIncludesCurrentUtcDay('2026-03-18', '2026-03-19', new Date('2026-03-19T12:00:00.000Z')), true);
 });
+
+
+test('deriveBacktestProgress computes an ETA while a backtest is actively running', () => {
+  const progress = deriveBacktestProgress({
+    status: 'running',
+    progress_pct: 40,
+    elapsed_ms: 20_000,
+    current_marker: 'Replaying historical sessions',
+    progress_json: JSON.stringify({
+      phase: 'replaying',
+      coverage: null,
+      hydration: null,
+      replay: {
+        day: '2026-03-18',
+        status: 'running',
+        replayedTrades: 400,
+        totalTrades: 1000,
+        percent: 40
+      }
+    })
+  });
+
+  assert.equal(progress.progressLabel, '400 / 1000 trades · 40%');
+  assert.equal(progress.secondaryLabel, '2026-03-18 · Running');
+  assert.equal(progress.etaMs, 30000);
+});

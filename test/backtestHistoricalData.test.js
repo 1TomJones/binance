@@ -668,6 +668,61 @@ test('multi-day backtests stream historical SQLite trades in bounded chunks inst
   assert.ok(Math.max(...pageLoads) <= 64, 'expected chunk loader to stay within the configured page size');
 });
 
+test('backtest replay yields to the event loop so live work can continue while a replay is running', async () => {
+  const strategy = buildStrategy();
+  const dayStartMs = Date.UTC(2026, 2, 15);
+  const trades = buildDayTrades(dayStartMs, Array.from({ length: 500 }, (_, index) => 100 + (index / 1000)));
+  const runner = new BacktestRunner({
+    executionEngine: new StrategyExecutionEngine(),
+    historicalDataService: {
+      async loadDay() {
+        return {
+          tradeCount: trades.length,
+          seedTrade: {
+            trade_id: dayStartMs - 1,
+            symbol: 'BTCUSDT',
+            price: 99,
+            quantity: 0.25,
+            trade_time: dayStartMs - 1,
+            maker_flag: 0,
+            side: 'buy',
+            ingest_ts: dayStartMs - 1
+          },
+          trades
+        };
+      }
+    },
+    loadTrades: () => [],
+    loadSeedTrade: () => null
+  });
+
+  let timerFired = false;
+  const timer = new Promise((resolve) => {
+    setTimeout(() => {
+      timerFired = true;
+      resolve();
+    }, 0);
+  });
+
+  const runPromise = runner.run({
+    strategy,
+    runConfig: {
+      startDate: '2026-03-15',
+      endDate: '2026-03-15',
+      enableShort: false,
+      startedAtIso: '2026-03-19T00:00:00.000Z'
+    }
+  });
+
+  await timer;
+  const result = await runPromise;
+
+  assert.equal(timerFired, true);
+  assert.equal(result.sessionResults.length, 1);
+  assert.ok(result.sessionResults[0].sourceTradeCount >= 1);
+});
+
+
 test('live mode behavior remains unchanged because hydration wiring stays backtest-only', () => {
   const strategy = buildStrategy();
   const runner = new LivePaperRunner({

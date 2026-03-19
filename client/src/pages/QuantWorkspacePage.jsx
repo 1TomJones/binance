@@ -620,16 +620,28 @@ function ProgressPanel({ progress }) {
   const hydrationRetry = hydration.retry || null;
   return (
     <div className="quant-progress-panel">
-      <div className="quant-progress-track">
+      <div
+        className="quant-progress-track"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(pct)}
+        aria-label={progress.progressLabel || `Backtest progress ${formatNumber(pct)}%`}
+      >
         <div className="quant-progress-fill" style={{ width: `${pct}%` }} />
+      </div>
+      <div className="quant-note-card">
+        <strong>{progress.primaryLabel || 'Waiting to start'}</strong>
+        <span>{progress.secondaryLabel || progress.marker || 'Waiting to start'}</span>
       </div>
       <div className="quant-progress-grid">
         <MetricCard label="Primary state" value={progress.primaryLabel || 'Waiting to start'} />
         <MetricCard label="Status" value={progress.status} />
         <MetricCard label="Current session" value={progress.currentDayLabel} />
         <MetricCard label="Current UTC date" value={progress.currentDate} />
-        <MetricCard label="Overall progress" value={`${formatNumber(pct)}%`} />
+        <MetricCard label="Overall progress" value={progress.progressLabel || `${formatNumber(pct)}%`} />
         <MetricCard label="Elapsed" value={formatDuration(progress.elapsedMs)} />
+        <MetricCard label="ETA" value={progress.etaMs == null ? '—' : formatDuration(progress.etaMs)} />
         <MetricCard label="Closed trades" value={progress.totalTrades} />
         <MetricCard label="Active stage" value={progress.marker} />
       </div>
@@ -683,6 +695,12 @@ function ProgressPanel({ progress }) {
         <div className="quant-note-card">
           <strong>Current phase</strong>
           <span>{humanizeHydrationStatus(progress.phase)}</span>
+        </div>
+      ) : null}
+      {progress.status === 'Running' ? (
+        <div className="quant-note-card">
+          <strong>Render-safe execution</strong>
+          <span>The replay yields back to the event loop in small slices so the live paper engine and API routes stay responsive while the backtest is running.</span>
         </div>
       ) : null}
       {progress.errorMessage ? (
