@@ -19,6 +19,7 @@ import { StrategyParser } from './quant/strategyParser.js';
 import { StrategyExecutionEngine } from './quant/strategyExecutionEngine.js';
 import { enrichMarketCandles } from './quant/candleEnrichment.js';
 import { LivePaperRunner, LIVE_PAPER_LIMITS } from './quant/livePaperRunner.js';
+import { BacktestRunner, BACKTEST_SPEEDS } from './quant/backtestRunner.js';
 import { getBuiltInStrategyDefinition, listBuiltInLiveStrategies } from './quant/builtinStrategies.js';
 import { StrategyUploadService, StrategyValidationService } from './quant/strategyServices.js';
 import {
@@ -365,6 +366,49 @@ function mergeMinuteCandlesIntoSession(candles = []) {
   return merged;
 }
 
+async function fetchHistoricalCandlesForDay({ symbol = SYMBOL, date, timeframe = '1m' }) {
+  if (timeframe !== '1m') {
+    throw new Error(`Unsupported backtest timeframe: ${timeframe}`);
+  }
+
+  const dayStartMs = Date.parse(`${date}T00:00:00.000Z`);
+  const dayEndMs = dayStartMs + (24 * 60 * 60 * 1000) - 1;
+  if (!Number.isFinite(dayStartMs)) {
+    throw new Error('Invalid UTC date supplied for historical fetch.');
+  }
+
+  const collected = [];
+  let cursor = dayStartMs;
+
+  while (cursor <= dayEndMs) {
+    const search = new URLSearchParams({
+      symbol,
+      interval: '1m',
+      startTime: String(cursor),
+      endTime: String(dayEndMs),
+      limit: '1000'
+    });
+
+    const { payload: batch } = await fetchBinanceWithFallback('/klines', search, {
+      context: 'quant/backtest/klines'
+    });
+
+    if (!batch.length) break;
+
+    const normalized = batch.map(normalizeKline);
+    collected.push(...normalized);
+
+    const lastOpenMs = Number(batch.at(-1)?.[0] || cursor);
+    const nextCursor = lastOpenMs + 60_000;
+    if (nextCursor <= cursor) break;
+    cursor = nextCursor;
+  }
+
+  return collected
+    .filter((candle) => candle.time * 1000 >= dayStartMs && candle.time * 1000 <= dayEndMs)
+    .sort((a, b) => a.time - b.time);
+}
+
 async function backfillCurrentSessionCandlesFromBinance(dayStartMs, nowMs) {
   const collected = [];
   const nowSec = Math.floor(nowMs / 1000) * 1000;
@@ -625,6 +669,12 @@ const liveStrategyRunner = new LivePaperRunner({
   executionEngine
 });
 
+const backtestRunner = new BacktestRunner({
+  strategyResolver: resolveStrategy,
+  executionEngine,
+  fetchDayCandles: async ({ symbol, date, timeframe }) => fetchHistoricalCandlesForDay({ symbol, date, timeframe })
+});
+
 const stream = new BinanceStreamService({
   symbol: SYMBOL,
   onTrade: (trade) => {
@@ -712,6 +762,44 @@ app.get('/api/quant/live-metrics', (_req, res) => {
 app.get('/api/quant/live/strategies', (_req, res) => {
   return res.json({
     strategies: buildStrategyCatalog(),
+    limits: LIVE_PAPER_LIMITS
+  });
+});
+
+app.get('/api/quant/backtest/snapshot', (_req, res) => {
+  try {
+    return res.json({
+      snapshot: backtestRunner.getSnapshot(),
+      speeds: Object.values(BACKTEST_SPEEDS),
+      limits: LIVE_PAPER_LIMITS
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error.message || 'Unable to load backtest snapshot.' });
+  }
+});
+
+app.post('/api/quant/backtest/start', (req, res) => {
+  try {
+    const { strategyRef, runConfig, startDate, endDate, speed } = req.body || {};
+    if (!strategyRef) return res.status(400).json({ error: 'strategyRef is required.' });
+    if (!startDate || !endDate) return res.status(400).json({ error: 'startDate and endDate are required.' });
+    const snapshot = backtestRunner.start({
+      strategyRef,
+      runConfig: runConfig || {},
+      startDate,
+      endDate,
+      speed
+    });
+    return res.json({ snapshot, speeds: Object.values(BACKTEST_SPEEDS), limits: LIVE_PAPER_LIMITS });
+  } catch (error) {
+    return res.status(400).json({ error: error.message || 'Unable to start backtest.' });
+  }
+});
+
+app.post('/api/quant/backtest/stop', (_req, res) => {
+  return res.json({
+    snapshot: backtestRunner.stop(),
+    speeds: Object.values(BACKTEST_SPEEDS),
     limits: LIVE_PAPER_LIMITS
   });
 });

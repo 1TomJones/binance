@@ -662,3 +662,313 @@ body { margin: 0; background: #060b13; }
     grid-template-columns: 1fr;
   }
 }
+
+.quant-hero-quant {
+  margin-bottom: 18px;
+}
+
+.quant-tabs {
+  display: inline-flex;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 6px;
+  border: 1px solid rgba(31, 51, 83, 0.9);
+  border-radius: 16px;
+  background: rgba(10, 18, 31, 0.88);
+}
+
+.quant-tabs button,
+.quant-analysis-tabs button {
+  border: 1px solid #223756;
+  background: #0b1524;
+  color: #a4b7db;
+  border-radius: 12px;
+  padding: 10px 14px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 140px;
+  text-align: left;
+}
+
+.quant-tabs button.is-active,
+.quant-analysis-tabs button.is-active {
+  border-color: #4a73ae;
+  background: linear-gradient(180deg, rgba(27, 51, 86, 0.96), rgba(15, 30, 52, 0.92));
+  color: #edf4ff;
+}
+
+.quant-tabs button small,
+.quant-analysis-tabs button small {
+  color: #7d94ba;
+}
+
+.quant-backtest-layout,
+.quant-results-stack {
+  gap: 16px;
+}
+
+.quant-backtest-control-grid {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.85fr) minmax(420px, 1.15fr);
+  gap: 16px;
+}
+
+.quant-backtest-controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.quant-backtest-actions {
+  grid-column: span 3;
+}
+
+.quant-backtest-grid {
+  grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+}
+
+.quant-progress-stack,
+.quant-empty-state,
+.quant-analysis-grid,
+.quant-outcome-stack,
+.quant-duration-bars,
+.quant-exit-reasons {
+  display: grid;
+  gap: 14px;
+}
+
+.quant-progress-row {
+  display: grid;
+  gap: 8px;
+}
+
+.quant-progress-head,
+.quant-duration-meta,
+.quant-exit-row,
+.quant-outcome-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.quant-progress-bar {
+  height: 10px;
+  background: #0b1524;
+  border: 1px solid #1c3252;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.quant-progress-bar div,
+.quant-duration-bar div,
+.quant-hour-trade-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #5f89da, #86b7ff);
+}
+
+.quant-progress-meta-grid,
+.quant-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.quant-progress-meta-grid div,
+.quant-summary-card,
+.quant-backtest-empty {
+  border: 1px solid #14233a;
+  background: rgba(9, 17, 30, 0.82);
+  border-radius: 14px;
+  padding: 12px;
+}
+
+.quant-progress-meta-grid label,
+.quant-summary-card label,
+.quant-inline-note {
+  color: #7f96bb;
+}
+
+.quant-progress-meta-grid strong,
+.quant-summary-card strong,
+.quant-exit-row strong,
+.quant-outcome-row strong {
+  color: #eef4ff;
+}
+
+.quant-summary-card {
+  min-height: 92px;
+}
+
+.quant-summary-card strong {
+  display: block;
+  margin-top: 8px;
+  font-size: 18px;
+}
+
+.quant-analysis-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.quant-analysis-tabs button {
+  min-width: 0;
+  padding: 8px 12px;
+  justify-content: center;
+}
+
+.quant-bars-24 {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.quant-hour-bar,
+.quant-duration-card {
+  border: 1px solid #14233a;
+  background: rgba(9, 17, 30, 0.82);
+  border-radius: 14px;
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.quant-hour-visual {
+  height: 120px;
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(71, 194, 143, 0.08), rgba(71, 194, 143, 0.02));
+  border: 1px solid rgba(71, 194, 143, 0.16);
+  display: flex;
+  align-items: flex-end;
+  padding: 8px;
+}
+
+.quant-hour-fill {
+  width: 100%;
+  border-radius: 10px 10px 6px 6px;
+  background: linear-gradient(180deg, #47c28f, #25684d);
+}
+
+.quant-hour-bar strong,
+.quant-hour-bar span,
+.quant-hour-bar small {
+  display: block;
+}
+
+.quant-hour-trade-fill {
+  width: 0;
+  min-height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #f2c96d, #d8b04d);
+}
+
+.quant-analysis-split {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.8fr) minmax(260px, 1fr);
+  gap: 16px;
+}
+
+.quant-outcome-row,
+.quant-exit-row {
+  border: 1px solid #14233a;
+  background: rgba(9, 17, 30, 0.82);
+  border-radius: 14px;
+  padding: 12px;
+}
+
+.quant-outcome-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.quant-outcome-row i {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  display: inline-block;
+}
+
+.quant-exit-reasons h4 {
+  margin: 0;
+}
+
+.quant-duration-bar {
+  height: 12px;
+  border-radius: 999px;
+  background: #0b1524;
+  border: 1px solid #1c3252;
+  overflow: hidden;
+}
+
+.quant-inline-note {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.quant-empty-state {
+  text-align: center;
+  padding: 40px 28px;
+}
+
+.quant-empty-state h3,
+.quant-chart-caption {
+  margin: 0;
+}
+
+.quant-empty-state p,
+.quant-chart-caption {
+  color: #8ea3c7;
+}
+
+.quant-results-chart {
+  display: grid;
+  gap: 10px;
+}
+
+.quant-chart-caption strong {
+  color: #eef4ff;
+}
+
+.quant-chart-legend .is-cvd { background: #f2c96d; }
+
+@media (max-width: 1280px) {
+  .quant-backtest-control-grid,
+  .quant-analysis-split,
+  .quant-backtest-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .quant-backtest-controls,
+  .quant-progress-meta-grid,
+  .quant-summary-grid,
+  .quant-bars-24 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .quant-tabs {
+    display: grid;
+  }
+
+  .quant-backtest-controls,
+  .quant-progress-meta-grid,
+  .quant-summary-grid,
+  .quant-bars-24,
+  .quant-analysis-split {
+    grid-template-columns: 1fr;
+  }
+
+  .quant-tabs button,
+  .quant-analysis-tabs button {
+    width: 100%;
+  }
+
+  .quant-backtest-actions {
+    grid-column: span 1;
+  }
+}
