@@ -3,7 +3,10 @@ import { HistoricalMarketReplay } from './historicalMarketReplay.js';
 import { timeframeToSeconds } from '../sessionAnalytics.js';
 
 const PROGRESS_EMIT_EVERY_CANDLES = 25;
-const YIELD_EVERY_CANDLES = 100;
+const EVENT_LOOP_YIELD_EVERY_CANDLES = 100;
+const EVENT_LOOP_YIELD_EVERY_TRADES = 2000;
+const EVENT_LOOP_SLICE_BUDGET_MS = 12;
+const FINALIZING_PROGRESS_PCT = 95;
 
 export class BacktestRunner {
   constructor({ executionEngine, loadTrades, loadSeedTrade, historicalDataService }) {
@@ -16,18 +19,29 @@ export class BacktestRunner {
   async run({ strategy, runConfig, progressCallback, shouldStop, coveragePlan = null }) {
     const startDate = normalizeDay(runConfig.startDate);
     const endDate = normalizeDay(runConfig.endDate || runConfig.startDate);
-    const replayDays = coveragePlan?.days?.length ? coveragePlan.days : [...iterateUtcDays(startDate, endDate)].map((day) => ({ ...day, targetEndMs: day.dayEndMs }));
+    const replayDays = coveragePlan?.days?.length
+      ? coveragePlan.days
+      : [...iterateUtcDays(startDate, endDate)].map((day) => ({ ...day, targetEndMs: day.dayEndMs }));
+
     const runState = this.executionEngine.createRunState({ strategy, runConfig });
     const totalDays = replayDays.length;
     const timeframeSec = timeframeToSeconds(strategy.market?.timeframe || '1m');
-    const candlesPerDay = Math.floor(86400 / timeframeSec);
-    const totalCandlesTarget = Math.max(totalDays * candlesPerDay, 1);
+    const estimatedCandlesPerDay = Math.max(Math.floor(86400 / timeframeSec), 1);
+    const totalCandlesTarget = Math.max(totalDays * estimatedCandlesPerDay, 1);
     const sessionResults = [];
     const startedAtMs = Date.parse(runConfig.startedAtIso || new Date().toISOString());
+    const fillModel = this.executionEngine.createFillModel({
+      syntheticSpreadBps: runState.settings.syntheticSpreadBps
+    });
 
-    let processedCandles = 0;
-    let emittedSinceProgress = 0;
-    let emittedSinceYield = 0;
+    const runtime = {
+      processedCandles: 0,
+      processedTrades: 0,
+      emittedSinceProgress: 0,
+      candlesSinceYield: 0,
+      tradesSinceYield: 0,
+      sliceStartedAtMs: Date.now()
+    };
 
     const emitProgress = ({
       currentDate,
@@ -35,10 +49,11 @@ export class BacktestRunner {
       stage,
       replay = null,
       hydration = null,
-      progressPct = null
+      progressPct = null,
+      phase = 'replaying'
     }) => {
       progressCallback?.({
-        processed: processedCandles,
+        processed: runtime.processedCandles,
         total: totalCandlesTarget,
         progressPct: Number.isFinite(Number(progressPct))
           ? Number(progressPct)
@@ -49,9 +64,16 @@ export class BacktestRunner {
         totalTrades: runState.trades.length,
         elapsedMs: Date.now() - startedAtMs,
         marker: stage,
-        phase: 'replaying',
+        phase,
         hydration,
-        replay
+        replay: replay
+          ? {
+              ...replay,
+              processedCandles: runtime.processedCandles,
+              processedTrades: runtime.processedTrades,
+              totalCandlesTarget
+            }
+          : null
       });
     };
 
@@ -78,9 +100,7 @@ export class BacktestRunner {
           status: 'pending',
           replayedTrades: 0,
           totalTrades: 0,
-          processedCandles,
-          totalCandlesTarget,
-          percent: totalCandlesTarget ? (processedCandles / totalCandlesTarget) * 100 : 0
+          percent: computeDayProgressPct({ replayedTrades: 0, totalTrades: 0 })
         }
       });
 
@@ -99,11 +119,10 @@ export class BacktestRunner {
               status: 'pending',
               replayedTrades: 0,
               totalTrades: Number(payload.tradeCount || 0),
-              processedCandles,
-              totalCandlesTarget,
-              percent: totalCandlesTarget ? (processedCandles / totalCandlesTarget) * 100 : 0
+              percent: computeDayProgressPct({ replayedTrades: 0, totalTrades: Number(payload.tradeCount || 0) })
             },
-            progressPct: payload.progressPct
+            progressPct: payload.progressPct,
+            phase: payload.phase || 'replaying'
           });
         },
         targetEndMs
@@ -112,7 +131,6 @@ export class BacktestRunner {
       const tradeSource = dayPayload.tradeStream || dayPayload.trades || [];
       const seedTrade = dayPayload.seedTrade || null;
       const totalDayTrades = Math.max(Number(dayPayload.tradeCount ?? (Array.isArray(tradeSource) ? tradeSource.length : 0)) || 0, 1);
-
       const sessionReplay = new HistoricalMarketReplay({
         timeframe: strategy.market.timeframe,
         sessionStartMs: dayStartMs,
@@ -123,60 +141,64 @@ export class BacktestRunner {
 
       const dayTradeStartIndex = runState.trades.length;
       let replayedTradeCount = 0;
+      let emittedCandleCountForDay = 0;
 
       for await (const trade of iterateTrades(tradeSource)) {
         shouldStop?.();
         replayedTradeCount += 1;
+        runtime.processedTrades += 1;
+        runtime.tradesSinceYield += 1;
+
         if (sessionReplay.seedPrice == null && Number.isFinite(Number(trade?.price))) {
           sessionReplay.seedPrice = Number(trade.price);
         }
+
         const closedCandles = sessionReplay.processTrade(trade);
-        ({ processedCandles, emittedSinceProgress, emittedSinceYield } = await this.#drainCandles({
+        emittedCandleCountForDay += closedCandles.length;
+        await this.#drainCandles({
           closedCandles,
           strategy,
           runState,
-          processedCandles,
-          emittedSinceProgress,
-          emittedSinceYield,
+          fillModel,
+          runtime,
           emitProgress,
           currentDate: isoDate,
           currentDay: dayIndex + 1,
           progressStage: `Replaying session ${Math.min(replayedTradeCount, totalDayTrades)}/${totalDayTrades} trades`,
           totalDayTrades,
-          replayedTradeCount,
-          totalCandlesTarget
-        }));
+          replayedTradeCount
+        });
+
+        await maybeYieldToEventLoop(runtime);
       }
 
-      ({ processedCandles, emittedSinceProgress, emittedSinceYield } = await this.#drainCandles({
-        closedCandles: sessionReplay.flushRemaining(),
+      const flushedCandles = sessionReplay.flushRemaining();
+      emittedCandleCountForDay += flushedCandles.length;
+      await this.#drainCandles({
+        closedCandles: flushedCandles,
         strategy,
         runState,
-        processedCandles,
-        emittedSinceProgress,
-        emittedSinceYield,
+        fillModel,
+        runtime,
         emitProgress,
         currentDate: isoDate,
         currentDay: dayIndex + 1,
         progressStage: 'Flushing end-of-day candles',
         totalDayTrades,
-        replayedTradeCount,
-        totalCandlesTarget
-      }));
+        replayedTradeCount
+      });
 
       const flattenedTrade = this.executionEngine.finalizeDay({
         strategy,
         state: runState,
-        fillModel: this.executionEngine.createFillModel({
-          syntheticSpreadBps: runState.settings.syntheticSpreadBps
-        }),
+        fillModel,
         dateLabel: isoDate
       });
 
       const dayTradesClosed = runState.trades.slice(dayTradeStartIndex);
       sessionResults.push(buildSessionResult({
         isoDate,
-        candleCount: candlesPerDay,
+        candleCount: emittedCandleCountForDay,
         trades: dayTradesClosed,
         sourceTradeCount: replayedTradeCount,
         flattenedTrade
@@ -201,19 +223,20 @@ export class BacktestRunner {
           status: 'complete',
           replayedTrades: replayedTradeCount,
           totalTrades: totalDayTrades,
-          processedCandles,
-          totalCandlesTarget,
-          percent: totalCandlesTarget ? (processedCandles / totalCandlesTarget) * 100 : 100
+          percent: 100
         }
       });
 
-      await yieldToEventLoop();
+      await schedulerYield();
+      runtime.sliceStartedAtMs = Date.now();
+      runtime.candlesSinceYield = 0;
+      runtime.tradesSinceYield = 0;
     }
 
     progressCallback?.({
-      processed: processedCandles,
+      processed: runtime.processedCandles,
       total: totalCandlesTarget,
-      progressPct: 95,
+      progressPct: FINALIZING_PROGRESS_PCT,
       currentDate: replayDays.at(-1)?.isoDate || null,
       currentDay: totalDays || null,
       totalDays,
@@ -283,21 +306,15 @@ export class BacktestRunner {
     closedCandles,
     strategy,
     runState,
-    processedCandles,
-    emittedSinceProgress,
-    emittedSinceYield,
+    fillModel,
+    runtime,
     emitProgress,
     currentDate,
     currentDay,
     progressStage,
     totalDayTrades,
-    replayedTradeCount,
-    totalCandlesTarget
+    replayedTradeCount
   }) {
-    const fillModel = this.executionEngine.createFillModel({
-      syntheticSpreadBps: runState.settings.syntheticSpreadBps
-    });
-
     for (const candle of closedCandles) {
       this.executionEngine.processCandle({
         strategy,
@@ -307,11 +324,11 @@ export class BacktestRunner {
         currentDateLabel: currentDate
       });
 
-      processedCandles += 1;
-      emittedSinceProgress += 1;
-      emittedSinceYield += 1;
+      runtime.processedCandles += 1;
+      runtime.emittedSinceProgress += 1;
+      runtime.candlesSinceYield += 1;
 
-      if (emittedSinceProgress >= PROGRESS_EMIT_EVERY_CANDLES) {
+      if (runtime.emittedSinceProgress >= PROGRESS_EMIT_EVERY_CANDLES) {
         emitProgress({
           currentDate,
           currentDay,
@@ -321,21 +338,17 @@ export class BacktestRunner {
             status: 'running',
             replayedTrades: replayedTradeCount,
             totalTrades: totalDayTrades,
-            processedCandles,
-            totalCandlesTarget,
-            percent: totalCandlesTarget ? (processedCandles / totalCandlesTarget) * 100 : 0
+            percent: computeDayProgressPct({
+              replayedTrades: replayedTradeCount,
+              totalTrades: totalDayTrades
+            })
           }
         });
-        emittedSinceProgress = 0;
+        runtime.emittedSinceProgress = 0;
       }
 
-      if (emittedSinceYield >= YIELD_EVERY_CANDLES) {
-        await yieldToEventLoop();
-        emittedSinceYield = 0;
-      }
+      await maybeYieldToEventLoop(runtime);
     }
-
-    return { processedCandles, emittedSinceProgress, emittedSinceYield };
   }
 }
 
@@ -344,8 +357,13 @@ function computeReplayProgressPct({ currentDay, totalDays, replayPercent }) {
   const safeTotalDays = Math.max(Number(totalDays) || 1, 1);
   const completedDays = Math.min(safeCurrentDay - 1, safeTotalDays);
   const replayRatio = clampRatio((Number(replayPercent) || 0) / 100);
-  const dayRatio = 0.5 + (replayRatio * 0.45);
-  return ((completedDays + clampRatio(dayRatio)) / safeTotalDays) * 100;
+  const weightedRunRatio = 0.5 + (replayRatio * 0.45);
+  return ((completedDays + clampRatio(weightedRunRatio)) / safeTotalDays) * 100;
+}
+
+function computeDayProgressPct({ replayedTrades, totalTrades }) {
+  if (!Number.isFinite(Number(totalTrades)) || Number(totalTrades) <= 0) return 0;
+  return clampRatio(Number(replayedTrades || 0) / Number(totalTrades)) * 100;
 }
 
 function clampRatio(value) {
@@ -399,8 +417,28 @@ function round(value) {
   return Number((value || 0).toFixed(4));
 }
 
-function yieldToEventLoop() {
-  return new Promise((resolve) => setTimeout(resolve, 0));
+async function maybeYieldToEventLoop(runtime) {
+  const elapsedMs = Date.now() - Number(runtime.sliceStartedAtMs || 0);
+  const shouldYield = runtime.candlesSinceYield >= EVENT_LOOP_YIELD_EVERY_CANDLES
+    || runtime.tradesSinceYield >= EVENT_LOOP_YIELD_EVERY_TRADES
+    || elapsedMs >= EVENT_LOOP_SLICE_BUDGET_MS;
+
+  if (!shouldYield) return;
+
+  await schedulerYield();
+  runtime.sliceStartedAtMs = Date.now();
+  runtime.candlesSinceYield = 0;
+  runtime.tradesSinceYield = 0;
+}
+
+function schedulerYield() {
+  return new Promise((resolve) => {
+    if (typeof setImmediate === 'function') {
+      setImmediate(resolve);
+      return;
+    }
+    setTimeout(resolve, 0);
+  });
 }
 
 async function* iterateTrades(tradeSource) {
