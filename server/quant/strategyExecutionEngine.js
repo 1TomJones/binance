@@ -37,6 +37,7 @@ export class StrategyExecutionEngine {
       tradeLog: [],
       equitySeries: [],
       cumulativeRealizedSeries: [],
+      realizedPnl: 0,
       position: null,
       lastProcessedCandleTime: null,
       session: this.createSessionState()
@@ -73,11 +74,12 @@ export class StrategyExecutionEngine {
         const exitPrice = fillModel.getExitPrice({ side: state.position.side, candle, reason: exitReason });
         const closed = this.#closePosition({ position: state.position, candle, exitPrice, reason: exitReason });
         state.equity += closed.realizedPnl;
+        state.realizedPnl += closed.realizedPnl;
         state.trades.push(closed);
         state.cumulativeRealizedSeries.push({
           index: state.cumulativeRealizedSeries.length + 1,
           time: closed.exitTime,
-          cumulativeRealizedPnl: round(state.trades.reduce((sum, trade) => sum + trade.realizedPnl, 0))
+          cumulativeRealizedPnl: round(state.realizedPnl)
         });
         state.tradeLog.unshift(buildTradeLogRow(closed, 'EXIT'));
         state.position = null;
@@ -136,11 +138,12 @@ export class StrategyExecutionEngine {
     });
 
     state.equity += closed.realizedPnl;
+    state.realizedPnl += closed.realizedPnl;
     state.trades.push(closed);
     state.cumulativeRealizedSeries.push({
       index: state.cumulativeRealizedSeries.length + 1,
       time: closed.exitTime,
-      cumulativeRealizedPnl: round(state.trades.reduce((sum, trade) => sum + trade.realizedPnl, 0))
+      cumulativeRealizedPnl: round(state.realizedPnl)
     });
     state.tradeLog.unshift(buildTradeLogRow(closed, 'EXIT'));
     state.position = null;

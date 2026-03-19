@@ -20,7 +20,6 @@ const DEFAULT_SETTINGS = {
 const DEFAULT_BACKTEST_CONFIG = {
   startDate: '',
   endDate: '',
-  replaySpeed: 60,
   initialBalance: 10000,
   ...DEFAULT_SETTINGS
 };
@@ -440,10 +439,10 @@ export function QuantWorkspacePage() {
                 <Field label="Initial balance">
                   <input type="number" min="100" step="100" value={backtestConfig.initialBalance} onChange={handleBacktestNumberChange('initialBalance')} />
                 </Field>
-                <Field label="Replay speed target">
-                  <input type="range" min="1" max={limits.maxReplaySpeed || 60} step="1" value={backtestConfig.replaySpeed} onChange={handleBacktestNumberChange('replaySpeed')} />
-                  <small>{backtestConfig.replaySpeed}x target · backend runs as fast as practical.</small>
-                </Field>
+                <div className="quant-note-card">
+                  <strong>Replay model</strong>
+                  <span>Historical data is processed asynchronously in chronological order using the same paper execution rules as live mode.</span>
+                </div>
                 <Field label="Stop loss %">
                   <input type="number" min="0.01" max="25" step="0.01" value={backtestConfig.stopLossPct} onChange={handleBacktestNumberChange('stopLossPct')} />
                 </Field>
@@ -504,10 +503,21 @@ export function QuantWorkspacePage() {
                       <option value="timeOfDay">Time of day</option>
                       <option value="duration">Trade duration</option>
                       <option value="exitReasons">Exit reasons</option>
+                      <option value="sessions">Session results</option>
                     </select>
                   </div>
                   <AnalysisPanel view={analysisView} analyses={backtestResult.summary?.analyses || {}} summary={backtestResult.summary || {}} />
                 </section>
+              </section>
+
+              <section className="quant-card">
+                <div className="quant-card-header">
+                  <div>
+                    <h3>Session results</h3>
+                    <span>Daily UTC session resets with cumulative analytics preserved</span>
+                  </div>
+                </div>
+                <SessionResultsTable rows={backtestResult.summary?.sessionResults || []} />
               </section>
 
               <section className="quant-card">
@@ -588,11 +598,12 @@ function ProgressPanel({ progress }) {
       </div>
       <div className="quant-progress-grid">
         <MetricCard label="Status" value={progress.status} />
-        <MetricCard label="Current date" value={progress.currentDate} />
+        <MetricCard label="Current session" value={progress.currentDayLabel} />
+        <MetricCard label="Current UTC date" value={progress.currentDate} />
         <MetricCard label="Percent complete" value={`${formatNumber(pct)}%`} />
         <MetricCard label="Elapsed" value={formatDuration(progress.elapsedMs)} />
-        <MetricCard label="Trades so far" value={progress.totalTrades} />
-        <MetricCard label="Current marker" value={progress.marker} />
+        <MetricCard label="Closed trades" value={progress.totalTrades} />
+        <MetricCard label="Replay stage" value={progress.marker} />
       </div>
     </div>
   );
@@ -615,6 +626,9 @@ function AnalysisPanel({ view, analyses, summary }) {
         <BarChart rows={analyses.durationBuckets || []} dataKey="count" labelKey="key" title="Trade duration distribution" />
       </div>
     );
+  }
+  if (view === 'sessions') {
+    return <BarChart rows={analyses.sessions || []} dataKey="realizedPnl" labelKey="date" title="Session realized PnL by UTC day" />;
   }
   return <BarChart rows={analyses.exitReasons || []} dataKey="count" labelKey="reason" title="Exit reason count" />;
 }
@@ -645,17 +659,25 @@ function BarChart({ rows, dataKey, labelKey, title, suffix = '' }) {
     return <p className="quant-empty">No data available for this analysis yet.</p>;
   }
 
-  const maxValue = Math.max(...rows.map((row) => Number(row[dataKey] || 0)), 1);
+  const maxMagnitude = Math.max(...rows.map((row) => Math.abs(Number(row[dataKey] || 0))), 1);
   return (
     <div className="quant-bar-chart">
       <p className="quant-chart-title">{title}</p>
-      {rows.map((row) => (
-        <div key={row[labelKey]} className="quant-bar-row">
-          <span>{row[labelKey]}</span>
-          <div className="quant-bar-track"><div className="quant-bar-fill" style={{ width: `${(Number(row[dataKey] || 0) / maxValue) * 100}%` }} /></div>
-          <strong>{formatNumber(row[dataKey])}{suffix}</strong>
-        </div>
-      ))}
+      {rows.map((row) => {
+        const value = Number(row[dataKey] || 0);
+        return (
+          <div key={row[labelKey]} className="quant-bar-row">
+            <span>{row[labelKey]}</span>
+            <div className="quant-bar-track">
+              <div
+                className={`quant-bar-fill ${value < 0 ? 'is-negative' : ''}`}
+                style={{ width: `${(Math.abs(value) / maxMagnitude) * 100}%` }}
+              />
+            </div>
+            <strong>{formatNumber(value)}{suffix}</strong>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -728,6 +750,47 @@ function LiveTradeLogTable({ rows }) {
               <td className="quant-log-reason">{humanizeExitReason(row.reason)}</td>
               <td>{row.resultingPosition}</td>
               <td>{row.realizedPnl == null ? '—' : formatMoney(row.realizedPnl)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function SessionResultsTable({ rows }) {
+  if (!rows.length) {
+    return <p className="quant-empty">Session-level results will appear once at least one UTC day has been replayed.</p>;
+  }
+
+  return (
+    <div className="quant-table-wrap">
+      <table className="quant-table">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Trades</th>
+            <th>Wins</th>
+            <th>Losses</th>
+            <th>Breakeven</th>
+            <th>Realized PnL</th>
+            <th>Average trade</th>
+            <th>Average duration</th>
+            <th>Session close</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.date}>
+              <td>{row.date}</td>
+              <td>{row.tradeCount}</td>
+              <td>{row.wins}</td>
+              <td>{row.losses}</td>
+              <td>{row.breakeven}</td>
+              <td>{formatMoney(row.realizedPnl)}</td>
+              <td>{formatMoney(row.averageTradePnl)}</td>
+              <td>{formatNumber(row.averageDurationMinutes)} min</td>
+              <td>{row.endOfDayExit ? humanizeExitReason(row.endOfDayExit) : 'Flat'}</td>
             </tr>
           ))}
         </tbody>
@@ -916,22 +979,29 @@ function findStrategy(strategyOptions, selection) {
 
 function deriveCurrentProgress(job) {
   const latest = job?.status ? job : null;
+  const currentDay = Number(latest?.current_day || 0);
+  const totalDays = Number(latest?.total_days || 0);
   return {
     status: humanizeStatus(latest?.status || 'ready'),
-    currentDate: parseCurrentDate(latest?.current_marker) || '—',
+    currentDate: latest?.current_date || parseCurrentDate(latest?.current_marker) || '—',
+    currentDayLabel: currentDay && totalDays ? `Day ${currentDay} / ${totalDays}` : '—',
     percent: latest?.progress_pct || 0,
     elapsedMs: latest?.elapsed_ms || 0,
-    totalTrades: parseTradeCount(latest?.current_marker),
+    totalTrades: latest?.closed_trade_count || parseTradeCount(latest?.current_marker),
     marker: latest?.current_marker || 'Waiting to start'
   };
 }
 
 function buildBacktestMetrics(summary = {}) {
+  const sessionResults = summary.sessionResults || [];
+  const positiveSessions = sessionResults.filter((row) => Number(row.realizedPnl || 0) > 0).length;
   return [
     ['Total trades', summary.totalTrades || 0],
     ['Wins', summary.wins || 0],
     ['Losses', summary.losses || 0],
     ['Win rate', `${formatNumber(summary.winRate)}%`],
+    ['Backtest days', sessionResults.length],
+    ['Winning days', positiveSessions],
     ['Cumulative realized PnL', formatMoney(summary.cumulativeRealizedPnl)],
     ['Average trade PnL', formatMoney(summary.averageTradePnl)],
     ['Best trade', formatMoney(summary.bestTrade)],

@@ -26,7 +26,13 @@ export class BacktestJobService {
       strategy_id: strategyRef?.id && Number.isFinite(Number(strategyRef.id)) ? Number(strategyRef.id) : null,
       run_config_json: JSON.stringify({ ...runConfig, strategyRef })
     });
-    setTimeout(() => this.#run(job.id, strategyRef, runConfig), 0);
+
+    setTimeout(() => {
+      this.#run(job.id, strategyRef, runConfig).catch((error) => {
+        console.error('[backtest] uncaught runner failure', { jobId: job.id, error: error?.message || error });
+      });
+    }, 0);
+
     return job;
   }
 
@@ -37,9 +43,18 @@ export class BacktestJobService {
       const resolved = this.resolveStrategy(strategyRef);
       if (!resolved) throw new Error('Strategy not found');
 
-      this.updateJob(jobId, { status: 'running', progress_pct: 1, current_marker: 'Preparing historical replay', elapsed_ms: 0 });
+      this.updateJob(jobId, {
+        status: 'running',
+        progress_pct: 1,
+        current_marker: 'Preparing replay engine',
+        current_date: runConfig?.startDate || null,
+        current_day: 1,
+        total_days: computeDayCount(runConfig?.startDate, runConfig?.endDate),
+        closed_trade_count: 0,
+        elapsed_ms: 0
+      });
 
-      const resultPayload = this.backtestRunner.run({
+      const resultPayload = await this.backtestRunner.run({
         strategy: resolved.strategy,
         runConfig: {
           ...runConfig,
@@ -49,16 +64,19 @@ export class BacktestJobService {
           const dbJob = this.getJobById(jobId);
           if (!dbJob || dbJob.status === 'cancelled') throw new Error('cancelled');
         },
-        progressCallback: ({ processed, total, marker, currentDate, totalTrades, elapsedMs, dayIndex, totalDays }) => {
+        progressCallback: ({ processed, total, marker, currentDate, currentDay, totalDays, totalTrades, elapsedMs }) => {
           const dbJob = this.getJobById(jobId);
           if (!dbJob || dbJob.status === 'cancelled') throw new Error('cancelled');
           this.updateJob(jobId, {
             status: 'running',
             progress_pct: Math.min(Math.floor((processed / Math.max(total, 1)) * 100), 99),
             processed_items: processed,
-            current_marker: `${marker} · ${totalTrades} trades · day ${dayIndex}/${totalDays}`,
-            elapsed_ms: elapsedMs,
-            current_date: currentDate
+            current_marker: marker,
+            current_date: currentDate,
+            current_day: currentDay,
+            total_days: totalDays,
+            closed_trade_count: totalTrades,
+            elapsed_ms: elapsedMs
           });
         }
       });
@@ -68,8 +86,9 @@ export class BacktestJobService {
         summary_json: JSON.stringify({
           ...resultPayload.metrics,
           analyses: resultPayload.analyses,
-          dayResults: resultPayload.dayResults,
-          strategy: resolved.summary
+          sessionResults: resultPayload.sessionResults,
+          strategy: resolved.summary,
+          runConfig
         }),
         equity_series_json: JSON.stringify({
           cumulativePnlSeries: resultPayload.cumulativePnlSeries,
@@ -83,7 +102,8 @@ export class BacktestJobService {
         progress_pct: 100,
         current_marker: 'Completed',
         result_id: result.id,
-        elapsed_ms: Date.now() - startedAt
+        elapsed_ms: Date.now() - startedAt,
+        closed_trade_count: resultPayload.trades.length
       });
     } catch (error) {
       if (String(error?.message).includes('cancelled')) return;
@@ -110,4 +130,13 @@ export class BacktestJobService {
   getProgress(jobId) {
     return this.listJobProgress(jobId);
   }
+}
+
+function computeDayCount(startDate, endDate) {
+  if (!startDate) return null;
+  const start = new Date(startDate);
+  const end = new Date(endDate || startDate);
+  const startMs = Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate());
+  const endMs = Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate());
+  return Math.floor((endMs - startMs) / 86400000) + 1;
 }

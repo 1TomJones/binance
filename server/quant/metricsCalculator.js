@@ -2,16 +2,16 @@ export class MetricsCalculator {
   calculate({ initialBalance, equitySeries, trades, openPosition, lastPrice, cumulativeRealizedSeries = [] }) {
     const closedTrades = trades.filter((trade) => trade.status === 'closed');
     const ending = equitySeries.at(-1)?.equity ?? initialBalance;
-    const realizedPnl = closedTrades.reduce((acc, trade) => acc + trade.realizedPnl, 0);
+    const realizedPnl = closedTrades.reduce((acc, trade) => acc + Number(trade.realizedPnl || 0), 0);
     const unrealizedPnl = openPosition ? this.#calcUnrealized(openPosition, lastPrice) : 0;
-    const wins = closedTrades.filter((trade) => trade.realizedPnl > 0);
-    const losses = closedTrades.filter((trade) => trade.realizedPnl < 0);
-    const breakeven = closedTrades.filter((trade) => trade.realizedPnl === 0);
-    const grossProfit = wins.reduce((acc, trade) => acc + trade.realizedPnl, 0);
-    const grossLoss = Math.abs(losses.reduce((acc, trade) => acc + trade.realizedPnl, 0));
+    const wins = closedTrades.filter((trade) => Number(trade.realizedPnl || 0) > 0);
+    const losses = closedTrades.filter((trade) => Number(trade.realizedPnl || 0) < 0);
+    const breakeven = closedTrades.filter((trade) => Number(trade.realizedPnl || 0) === 0);
+    const grossProfit = wins.reduce((acc, trade) => acc + Number(trade.realizedPnl || 0), 0);
+    const grossLoss = Math.abs(losses.reduce((acc, trade) => acc + Number(trade.realizedPnl || 0), 0));
     const returns = this.#seriesReturns(equitySeries);
-    const tradePnls = closedTrades.map((x) => x.realizedPnl);
-    const durations = closedTrades.map((x) => x.durationMinutes || 0);
+    const tradePnls = closedTrades.map((trade) => Number(trade.realizedPnl || 0));
+    const durations = closedTrades.map((trade) => Number(trade.durationMinutes || 0));
 
     return {
       netPnl: round(ending + unrealizedPnl - initialBalance),
@@ -26,10 +26,10 @@ export class MetricsCalculator {
       bestTrade: round(Math.max(...tradePnls, 0)),
       worstTrade: round(Math.min(...tradePnls, 0)),
       profitFactor: round(grossLoss ? grossProfit / grossLoss : grossProfit > 0 ? 999 : 0),
-      maxDrawdown: round(Math.max(...equitySeries.map((p) => p.drawdownPct || 0), 0)),
+      maxDrawdown: round(Math.max(...equitySeries.map((point) => Number(point.drawdownPct || 0)), 0)),
       sharpeRatio: round(this.#sharpe(returns)),
       expectancy: round(avg(tradePnls)),
-      averageHoldingBars: round(avg(closedTrades.map((x) => x.holdingBars))),
+      averageHoldingBars: round(avg(closedTrades.map((trade) => Number(trade.holdingBars || 0)))),
       realizedPnl: round(realizedPnl),
       cumulativeRealizedPnl: round(realizedPnl),
       unrealizedPnl: round(unrealizedPnl),
@@ -40,52 +40,51 @@ export class MetricsCalculator {
     };
   }
 
-  buildAnalyses({ trades }) {
+  buildAnalyses({ trades, sessionResults = [] }) {
     const closedTrades = trades.filter((trade) => trade.status === 'closed');
-    const outcome = {
-      winning: closedTrades.filter((trade) => trade.realizedPnl > 0).length,
-      losing: closedTrades.filter((trade) => trade.realizedPnl < 0).length,
-      breakeven: closedTrades.filter((trade) => trade.realizedPnl === 0).length
-    };
-
-    const hours = Array.from({ length: 24 }, (_, hour) => {
-      const hourTrades = closedTrades.filter((trade) => new Date(trade.entryTime).getUTCHours() === hour);
-      const wins = hourTrades.filter((trade) => trade.realizedPnl > 0).length;
-      return {
-        hour,
-        label: `${String(hour).padStart(2, '0')}:00–${String((hour + 1) % 24).padStart(2, '0')}:00`,
-        tradeCount: hourTrades.length,
-        winRate: round((wins / Math.max(hourTrades.length, 1)) * 100),
-        averagePnl: round(avg(hourTrades.map((trade) => trade.realizedPnl)))
-      };
-    });
-
-    const durationBuckets = [
-      { key: '<5m', min: 0, max: 5 },
-      { key: '5-15m', min: 5, max: 15 },
-      { key: '15-30m', min: 15, max: 30 },
-      { key: '30-60m', min: 30, max: 60 },
-      { key: '60m+', min: 60, max: Infinity }
-    ].map((bucket) => ({
-      ...bucket,
-      count: closedTrades.filter((trade) => {
-        const minutes = Number(trade.durationMinutes || 0);
-        return minutes >= bucket.min && minutes < bucket.max;
-      }).length
-    }));
-
-    const exitReasons = ['take_profit', 'stop_loss', 'signal_exit', 'end_of_day_exit', 'max_holding_bars']
-      .map((reason) => ({
-        reason,
-        count: closedTrades.filter((trade) => trade.exitReason === reason).length
-      }))
-      .filter((item) => item.count > 0);
 
     return {
-      outcome,
-      timeOfDay: hours,
-      durationBuckets,
-      exitReasons
+      outcome: {
+        winning: closedTrades.filter((trade) => Number(trade.realizedPnl || 0) > 0).length,
+        losing: closedTrades.filter((trade) => Number(trade.realizedPnl || 0) < 0).length,
+        breakeven: closedTrades.filter((trade) => Number(trade.realizedPnl || 0) === 0).length
+      },
+      timeOfDay: Array.from({ length: 24 }, (_, hour) => {
+        const hourTrades = closedTrades.filter((trade) => new Date(trade.entryTime).getUTCHours() === hour);
+        const wins = hourTrades.filter((trade) => Number(trade.realizedPnl || 0) > 0).length;
+        return {
+          hour,
+          label: `${String(hour).padStart(2, '0')}:00–${String((hour + 1) % 24).padStart(2, '0')}:00`,
+          tradeCount: hourTrades.length,
+          winRate: round((wins / Math.max(hourTrades.length, 1)) * 100),
+          averagePnl: round(avg(hourTrades.map((trade) => Number(trade.realizedPnl || 0))))
+        };
+      }),
+      durationBuckets: [
+        { key: '<5m', min: 0, max: 5 },
+        { key: '5-15m', min: 5, max: 15 },
+        { key: '15-30m', min: 15, max: 30 },
+        { key: '30-60m', min: 30, max: 60 },
+        { key: '60m+', min: 60, max: Infinity }
+      ].map((bucket) => ({
+        ...bucket,
+        count: closedTrades.filter((trade) => {
+          const minutes = Number(trade.durationMinutes || 0);
+          return minutes >= bucket.min && minutes < bucket.max;
+        }).length
+      })),
+      exitReasons: ['take_profit', 'stop_loss', 'signal_exit', 'end_of_day_exit', 'max_holding_bars']
+        .map((reason) => ({
+          reason,
+          count: closedTrades.filter((trade) => trade.exitReason === reason).length
+        }))
+        .filter((item) => item.count > 0),
+      sessions: sessionResults.map((session) => ({
+        date: session.date,
+        tradeCount: session.tradeCount,
+        winRate: round(((session.wins || 0) / Math.max(session.tradeCount || 0, 1)) * 100),
+        realizedPnl: round(session.realizedPnl || 0)
+      }))
     };
   }
 
@@ -98,8 +97,8 @@ export class MetricsCalculator {
   #seriesReturns(series) {
     const values = [];
     for (let i = 1; i < series.length; i += 1) {
-      const prev = series[i - 1].equity;
-      const cur = series[i].equity;
+      const prev = Number(series[i - 1].equity || 0);
+      const cur = Number(series[i].equity || 0);
       values.push(prev ? (cur - prev) / prev : 0);
     }
     return values;
