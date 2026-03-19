@@ -93,6 +93,21 @@ db.exec(`
     elapsed_ms INTEGER,
     ts INTEGER NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS historical_trade_coverage (
+    symbol TEXT NOT NULL,
+    day_start_ms INTEGER NOT NULL,
+    day_end_ms INTEGER NOT NULL,
+    coverage_start_ms INTEGER NOT NULL,
+    coverage_end_ms INTEGER NOT NULL,
+    trade_count INTEGER NOT NULL DEFAULT 0,
+    first_trade_time INTEGER,
+    last_trade_time INTEGER,
+    status TEXT NOT NULL,
+    source TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (symbol, day_start_ms)
+  );
 `);
 
 ensureColumn('quant_backtest_jobs', 'current_date', 'TEXT');
@@ -173,6 +188,44 @@ const upsertLiveRunStmt = db.prepare(`
   ON CONFLICT(strategy_id) DO UPDATE SET
     status = excluded.status,
     state_json = excluded.state_json,
+    updated_at = excluded.updated_at
+`);
+
+const upsertHistoricalTradeCoverageStmt = db.prepare(`
+  INSERT INTO historical_trade_coverage (
+    symbol,
+    day_start_ms,
+    day_end_ms,
+    coverage_start_ms,
+    coverage_end_ms,
+    trade_count,
+    first_trade_time,
+    last_trade_time,
+    status,
+    source,
+    updated_at
+  ) VALUES (
+    @symbol,
+    @day_start_ms,
+    @day_end_ms,
+    @coverage_start_ms,
+    @coverage_end_ms,
+    @trade_count,
+    @first_trade_time,
+    @last_trade_time,
+    @status,
+    @source,
+    @updated_at
+  )
+  ON CONFLICT(symbol, day_start_ms) DO UPDATE SET
+    day_end_ms = excluded.day_end_ms,
+    coverage_start_ms = excluded.coverage_start_ms,
+    coverage_end_ms = excluded.coverage_end_ms,
+    trade_count = excluded.trade_count,
+    first_trade_time = excluded.first_trade_time,
+    last_trade_time = excluded.last_trade_time,
+    status = excluded.status,
+    source = excluded.source,
     updated_at = excluded.updated_at
 `);
 
@@ -272,6 +325,28 @@ export function getLatestTradeBefore(symbol, beforeMs) {
     ORDER BY trade_time DESC
     LIMIT 1
   `).get(symbol, beforeMs);
+}
+
+export function getTradeStatsByRange(symbol, start, end) {
+  return db.prepare(`
+    SELECT COUNT(*) as count, MIN(trade_time) as minTradeTime, MAX(trade_time) as maxTradeTime
+    FROM trades
+    WHERE symbol = ? AND trade_time BETWEEN ? AND ?
+  `).get(symbol, start, end);
+}
+
+export function getHistoricalTradeCoverage(symbol, dayStartMs) {
+  return db.prepare(`
+    SELECT symbol, day_start_ms, day_end_ms, coverage_start_ms, coverage_end_ms, trade_count,
+           first_trade_time, last_trade_time, status, source, updated_at
+    FROM historical_trade_coverage
+    WHERE symbol = ? AND day_start_ms = ?
+  `).get(symbol, dayStartMs);
+}
+
+export function saveHistoricalTradeCoverage(record) {
+  upsertHistoricalTradeCoverageStmt.run({ ...record, updated_at: Date.now() });
+  return getHistoricalTradeCoverage(record.symbol, record.day_start_ms);
 }
 
 export function getLatestBook(symbol) {
