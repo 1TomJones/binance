@@ -1,7 +1,13 @@
 import WebSocket from 'ws';
 
 const WS_BASE = 'wss://stream.binance.com:9443/ws';
-const REST_BASE = 'https://api.binance.com/api/v3';
+const REST_BASES = [
+  process.env.BINANCE_REST_URL,
+  'https://api.binance.com/api/v3',
+  'https://api1.binance.com/api/v3',
+  'https://data-api.binance.vision/api/v3'
+].filter(Boolean);
+const DEPTH_SNAPSHOT_RETRY_MS = 5_000;
 
 function buildDepthPayload(symbol, bids, asks, ts) {
   const topBids = [...bids.entries()]
@@ -40,6 +46,15 @@ function buildDepthPayload(symbol, bids, asks, ts) {
   };
 }
 
+function parseRetryAfterMs(responseBody = '') {
+  const bannedUntilMatch = String(responseBody).match(/until\s+(\d{13})/i);
+  if (bannedUntilMatch) {
+    return Math.max(DEPTH_SNAPSHOT_RETRY_MS, Number(bannedUntilMatch[1]) - Date.now());
+  }
+
+  return DEPTH_SNAPSHOT_RETRY_MS;
+}
+
 export class BinanceStreamService {
   constructor({ symbol = 'btcusdt', onTrade, onBookTicker, onDepth, onCandle, onCandleBootstrap, onTradeConnected }) {
     this.symbol = symbol.toLowerCase();
@@ -59,6 +74,7 @@ export class BinanceStreamService {
     this.bookReconnectTimer = null;
     this.depthReconnectTimer = null;
     this.klineReconnectTimer = null;
+    this.depthSnapshotRetryTimer = null;
 
     this.bids = new Map();
     this.asks = new Map();
@@ -83,6 +99,7 @@ export class BinanceStreamService {
     clearTimeout(this.bookReconnectTimer);
     clearTimeout(this.depthReconnectTimer);
     clearTimeout(this.klineReconnectTimer);
+    clearTimeout(this.depthSnapshotRetryTimer);
     clearTimeout(this.depthEmitTimer);
     this.tradeSocket?.close();
     this.bookSocket?.close();
@@ -92,7 +109,7 @@ export class BinanceStreamService {
 
   async bootstrapCandles() {
     try {
-      const url = `${REST_BASE}/klines?symbol=${this.symbol.toUpperCase()}&interval=1m&limit=400`;
+      const url = `${REST_BASES[0]}/klines?symbol=${this.symbol.toUpperCase()}&interval=1m&limit=400`;
       const response = await fetch(url);
       if (!response.ok) return;
       const data = await response.json();
@@ -166,10 +183,8 @@ export class BinanceStreamService {
     const url = `${WS_BASE}/${this.symbol}@depth@100ms`;
     this.depthSocket = new WebSocket(url);
 
-    this.depthSocket.on('open', async () => {
-      await this.loadDepthSnapshot();
-      this.flushDepthBuffer();
-      this.emitDepth(true);
+    this.depthSocket.on('open', () => {
+      void this.refreshDepthSnapshot({ reason: 'socket-open' });
     });
 
     this.depthSocket.on('message', (raw) => {
@@ -182,7 +197,10 @@ export class BinanceStreamService {
       this.processDepthMessage(msg);
     });
 
-    this.depthSocket.on('close', () => this.scheduleReconnect('depth'));
+    this.depthSocket.on('close', () => {
+      clearTimeout(this.depthSnapshotRetryTimer);
+      this.scheduleReconnect('depth');
+    });
     this.depthSocket.on('error', () => this.depthSocket?.close());
   }
 
@@ -210,40 +228,89 @@ export class BinanceStreamService {
   }
 
   async loadDepthSnapshot() {
-    if (this.resyncInFlight) return;
+    if (this.resyncInFlight) return false;
     this.resyncInFlight = true;
 
+    let retryAfterMs = DEPTH_SNAPSHOT_RETRY_MS;
+    let lastFailure = null;
+
     try {
-      const response = await fetch(`${REST_BASE}/depth?symbol=${this.symbol.toUpperCase()}&limit=1000`);
-      if (!response.ok) throw new Error('depth snapshot failed');
-      const snapshot = await response.json();
+      for (const baseUrl of REST_BASES) {
+        const url = `${baseUrl}/depth?symbol=${this.symbol.toUpperCase()}&limit=1000`;
 
-      this.bids.clear();
-      this.asks.clear();
+        try {
+          const response = await fetch(url);
+          if (!response.ok) {
+            const responseBody = await response.text();
+            retryAfterMs = Math.max(retryAfterMs, parseRetryAfterMs(responseBody));
+            lastFailure = { status: response.status, url, responseBody };
+            console.warn('[depth] snapshot request rejected', lastFailure);
+            continue;
+          }
 
-      snapshot.bids.forEach(([price, quantity]) => {
-        const p = Number(price);
-        const q = Number(quantity);
-        if (q > 0) this.bids.set(p, q);
-      });
+          const snapshot = await response.json();
+          this.bids.clear();
+          this.asks.clear();
 
-      snapshot.asks.forEach(([price, quantity]) => {
-        const p = Number(price);
-        const q = Number(quantity);
-        if (q > 0) this.asks.set(p, q);
-      });
+          snapshot.bids.forEach(([price, quantity]) => {
+            const p = Number(price);
+            const q = Number(quantity);
+            if (q > 0) this.bids.set(p, q);
+          });
 
-      this.lastUpdateId = snapshot.lastUpdateId;
-      this.depthReady = true;
+          snapshot.asks.forEach(([price, quantity]) => {
+            const p = Number(price);
+            const q = Number(quantity);
+            if (q > 0) this.asks.set(p, q);
+          });
+
+          this.lastUpdateId = snapshot.lastUpdateId;
+          this.depthReady = true;
+          clearTimeout(this.depthSnapshotRetryTimer);
+          return true;
+        } catch (error) {
+          lastFailure = { url, error: error?.message || String(error) };
+          console.warn('[depth] snapshot request failed', lastFailure);
+        }
+      }
+
+      this.depthReady = false;
+      console.warn('[depth] snapshot unavailable; continuing without order book until retry succeeds', lastFailure);
+      this.scheduleDepthSnapshotRetry(retryAfterMs);
+      return false;
     } finally {
       this.resyncInFlight = false;
     }
   }
 
+  async refreshDepthSnapshot({ reason = 'retry' } = {}) {
+    const loaded = await this.loadDepthSnapshot();
+    if (!loaded) return false;
+
+    const bufferedEventCount = this.depthBuffer.length;
+    this.flushDepthBuffer();
+    this.emitDepth(true);
+    console.info('[depth] snapshot synchronized', {
+      reason,
+      bufferedEventCount,
+      lastUpdateId: this.lastUpdateId
+    });
+    return true;
+  }
+
+  scheduleDepthSnapshotRetry(delayMs = DEPTH_SNAPSHOT_RETRY_MS) {
+    clearTimeout(this.depthSnapshotRetryTimer);
+    this.depthSnapshotRetryTimer = setTimeout(() => {
+      if (this.depthSocket?.readyState !== WebSocket.OPEN || this.depthReady) return;
+      void this.refreshDepthSnapshot({ reason: 'scheduled-retry' });
+    }, Math.max(1_000, delayMs));
+  }
+
   flushDepthBuffer() {
     if (!this.depthReady) return;
-    this.depthBuffer.forEach((msg) => this.processDepthMessage(msg));
+    const bufferedMessages = [...this.depthBuffer];
     this.depthBuffer = [];
+    bufferedMessages.forEach((msg) => this.processDepthMessage(msg));
   }
 
   processDepthMessage(msg) {
@@ -252,7 +319,7 @@ export class BinanceStreamService {
     if (msg.u <= this.lastUpdateId) return;
 
     if (msg.U > this.lastUpdateId + 1) {
-      this.resyncDepth();
+      void this.resyncDepth();
       return;
     }
 
@@ -272,11 +339,11 @@ export class BinanceStreamService {
   }
 
   async resyncDepth() {
-    if (this.resyncInFlight) return;
+    if (this.resyncInFlight) return false;
     this.depthReady = false;
     this.depthBuffer = [];
-    await this.loadDepthSnapshot();
-    this.emitDepth(true);
+    this.lastUpdateId = null;
+    return this.refreshDepthSnapshot({ reason: 'stream-gap' });
   }
 
   emitDepth(force = false) {
