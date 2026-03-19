@@ -1,8 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { Readable } from 'node:stream';
+import { deflateRawSync } from 'node:zlib';
 
 import { BacktestRunner } from '../server/quant/backtestRunner.js';
 import { HistoricalBacktestDataService, HistoricalCoverageError } from '../server/quant/historicalBacktestDataService.js';
+import { LivePaperRunner } from '../server/quant/livePaperRunner.js';
 import { StrategyExecutionEngine } from '../server/quant/strategyExecutionEngine.js';
 
 const DAY_MS = 86_400_000;
@@ -96,10 +99,13 @@ function createInMemoryHistoricalService({
   sleep = async () => {},
   streamTradesByRange = null,
   loadTradesByRange = null,
-  streamChunkSize = 128
+  streamChunkSize = 128,
+  bulkDataBaseUrl = 'https://bulk.example.test',
+  initialCoverage = null
 } = {}) {
   const storedTrades = [];
   const coverageRecords = [];
+  let coverageRecord = initialCoverage ? { ...initialCoverage } : null;
 
   const loadRange = loadTradesByRange || ((_symbol, startMs, endMs) => (
     storedTrades
@@ -108,13 +114,20 @@ function createInMemoryHistoricalService({
   ));
 
   const service = new HistoricalBacktestDataService({
-    getHistoricalCoverage: () => null,
+    getHistoricalCoverage: () => coverageRecord,
     saveHistoricalCoverage: (record) => {
       coverageRecords.push(record);
-      return record;
+      coverageRecord = { ...record };
+      return coverageRecord;
     },
     loadTradesByRange: loadRange,
     loadLatestTradeBefore,
+    loadLatestTradeInRange: (_symbol, startMs, endMs) => (
+      storedTrades
+        .filter((trade) => trade.trade_time >= startMs && trade.trade_time <= endMs)
+        .sort((a, b) => (a.trade_time - b.trade_time) || (a.trade_id - b.trade_id))
+        .at(-1) || null
+    ),
     getTradeStatsByRange: (_symbol, startMs, endMs) => {
       const trades = storedTrades
         .filter((trade) => trade.trade_time >= startMs && trade.trade_time <= endMs)
@@ -129,13 +142,19 @@ function createInMemoryHistoricalService({
     streamTradesByRange,
     fetchImpl,
     restBaseUrls: ['https://example.test/api/v3'],
+    bulkDataBaseUrl,
     now,
     retryBaseDelayMs,
     sleep,
     streamChunkSize
   });
 
-  return { service, storedTrades, coverageRecords };
+  return {
+    service,
+    storedTrades,
+    coverageRecords,
+    getCoverageRecord: () => coverageRecord
+  };
 }
 
 function buildAggTrade(id, tradeTime, price = 100 + (id / 10_000), maker = false) {
@@ -164,6 +183,50 @@ function createJsonResponse(status, body, headers = {}) {
       return typeof body === 'string' ? body : JSON.stringify(body);
     }
   };
+}
+
+function createStreamResponse(status, buffer, headers = {}) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: {
+      get(name) {
+        const key = String(name).toLowerCase();
+        if (key === 'content-length') return String(buffer.length);
+        return headers[key] ?? null;
+      }
+    },
+    body: Readable.toWeb(Readable.from([buffer])),
+    async text() {
+      return buffer.toString('utf8');
+    },
+    async json() {
+      return JSON.parse(buffer.toString('utf8'));
+    }
+  };
+}
+
+function createBulkZipResponse(lines) {
+  const csvBody = `${lines.join('\n')}\n`;
+  const csvBuffer = Buffer.from(csvBody, 'utf8');
+  const compressed = deflateRawSync(csvBuffer);
+  const fileName = Buffer.from('BTCUSDT-aggTrades.csv', 'utf8');
+  const header = Buffer.alloc(30);
+  header.writeUInt32LE(0x04034b50, 0);
+  header.writeUInt16LE(20, 4);
+  header.writeUInt16LE(0, 6);
+  header.writeUInt16LE(8, 8);
+  header.writeUInt32LE(0, 10);
+  header.writeUInt32LE(0, 14);
+  header.writeUInt32LE(compressed.length, 18);
+  header.writeUInt32LE(csvBuffer.length, 22);
+  header.writeUInt16LE(fileName.length, 26);
+  header.writeUInt16LE(0, 28);
+  return createStreamResponse(200, Buffer.concat([header, fileName, compressed]));
+}
+
+function buildBulkAggTradeCsvLine(id, tradeTime, price = 100 + (id / 10_000), maker = false) {
+  return [id, price.toFixed(2), '0.50000000', id, id, tradeTime, maker ? 'true' : 'false', 'true'].join(',');
 }
 
 test('backtest replays a fully historical day before the current UTC day and still produces trades', async () => {
@@ -254,6 +317,7 @@ test('backtest preserves chronological multi-day replay across several UTC sessi
 
 test('historical coverage failures raise a clear explicit error instead of replaying an empty session', async () => {
   const { service } = createInMemoryHistoricalService({
+    bulkDataBaseUrl: null,
     fetchImpl: async () => createJsonResponse(200, [])
   });
 
@@ -277,6 +341,7 @@ test('historical hydration retries recoverable Binance REST failures with backof
   let attempts = 0;
 
   const { service, storedTrades } = createInMemoryHistoricalService({
+    bulkDataBaseUrl: null,
     retryBaseDelayMs: 25,
     sleep: async (ms) => { sleepCalls.push(ms); },
     fetchImpl: async () => {
@@ -300,6 +365,129 @@ test('historical hydration retries recoverable Binance REST failures with backof
   assert.equal(storedTrades[0].trade_id, 1);
 });
 
+test('completed UTC day hydration prefers bulk-file source over REST', async () => {
+  const dayStartMs = Date.UTC(2026, 2, 10);
+  const dayEndMs = dayStartMs + DAY_MS - 1;
+  const calls = [];
+  const bulkLines = [
+    'agg_trade_id,price,quantity,first_trade_id,last_trade_id,transact_time,is_buyer_maker,was_best_price_match',
+    buildBulkAggTradeCsvLine(1, dayStartMs + 1_000),
+    buildBulkAggTradeCsvLine(2, dayStartMs + 61_000, 101, true),
+    buildBulkAggTradeCsvLine(3, dayEndMs, 102, false)
+  ];
+
+  const { service, storedTrades, getCoverageRecord } = createInMemoryHistoricalService({
+    fetchImpl: async (url) => {
+      calls.push(url);
+      if (String(url).endsWith('.zip')) return createBulkZipResponse(bulkLines);
+      throw new Error('REST should not be used when bulk hydration succeeds.');
+    }
+  });
+
+  const payload = await service.loadDay({ symbol: 'BTCUSDT', dayStartMs, dayEndMs });
+  const replayedTrades = Array.isArray(payload.trades) ? payload.trades : await collectAsync(payload.trades);
+
+  assert.equal(replayedTrades.length, 3);
+  assert.equal(storedTrades.length, 3, 'expected bulk hydration to persist the historical day without any REST pagination');
+  assert.equal(calls.length, 1);
+  assert.match(calls[0], /\.zip$/);
+  assert.equal(payload.hydrationSource, 'bulk-file');
+  assert.equal(getCoverageRecord()?.source, 'bulk-file');
+});
+
+test('partial hydration checkpoint resumes without re-fetching the already persisted prefix', async () => {
+  const dayStartMs = Date.UTC(2026, 2, 10);
+  const dayEndMs = dayStartMs + DAY_MS - 1;
+  const calls = [];
+  const { service, storedTrades, getCoverageRecord } = createInMemoryHistoricalService({
+    bulkDataBaseUrl: null,
+    initialCoverage: {
+      symbol: 'BTCUSDT',
+      day_start_ms: dayStartMs,
+      day_end_ms: dayEndMs,
+      coverage_start_ms: dayStartMs,
+      coverage_end_ms: dayStartMs + 61_000,
+      trade_count: 2,
+      first_trade_time: dayStartMs + 1_000,
+      last_trade_time: dayStartMs + 61_000,
+      last_agg_trade_id: 2,
+      checkpoint_time_ms: dayStartMs + 61_000,
+      checkpoint_rows: 2,
+      status: 'partial',
+      source: 'binance-rest'
+    },
+    fetchImpl: async (url) => {
+      calls.push(url);
+      const parsed = new URL(url);
+      assert.equal(parsed.searchParams.get('fromId'), '3');
+      return createJsonResponse(200, [
+        buildAggTrade(3, dayStartMs + 121_000),
+        buildAggTrade(4, dayStartMs + 181_000)
+      ]);
+    }
+  });
+
+  storedTrades.push(
+    {
+      trade_id: 1,
+      symbol: 'BTCUSDT',
+      price: 100,
+      quantity: 1,
+      trade_time: dayStartMs + 1_000,
+      maker_flag: 0,
+      side: 'buy',
+      ingest_ts: 1
+    },
+    {
+      trade_id: 2,
+      symbol: 'BTCUSDT',
+      price: 101,
+      quantity: 1,
+      trade_time: dayStartMs + 61_000,
+      maker_flag: 0,
+      side: 'buy',
+      ingest_ts: 2
+    }
+  );
+
+  const payload = await service.loadDay({ symbol: 'BTCUSDT', dayStartMs, dayEndMs });
+  const replayedTrades = Array.isArray(payload.trades) ? payload.trades : await collectAsync(payload.trades);
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(replayedTrades.map((trade) => trade.trade_id), [1, 2, 3, 4]);
+  assert.equal(getCoverageRecord()?.last_agg_trade_id, 4);
+  assert.equal(getCoverageRecord()?.checkpoint_time_ms, dayStartMs + 181_000);
+});
+
+test('retry/backoff progress messaging is visible while the same page is being retried', async () => {
+  const dayStartMs = Date.UTC(2026, 2, 10);
+  const events = [];
+  let attempts = 0;
+  const { service } = createInMemoryHistoricalService({
+    bulkDataBaseUrl: null,
+    retryBaseDelayMs: 20,
+    sleep: async () => {},
+    fetchImpl: async () => {
+      attempts += 1;
+      if (attempts < 3) return createJsonResponse(500, { msg: 'server busy' });
+      return createJsonResponse(200, [buildAggTrade(1, dayStartMs + 1_000)]);
+    }
+  });
+
+  await service.loadDay({
+    symbol: 'BTCUSDT',
+    dayStartMs,
+    dayEndMs: dayStartMs + DAY_MS - 1,
+    progressCallback: (payload) => events.push(payload)
+  });
+
+  const retryEvent = events.find((payload) => payload.hydration?.status === 'retrying');
+  assert.ok(retryEvent, 'expected a retry progress event');
+  assert.match(retryEvent.stage, /Retrying Binance REST page 1/);
+  assert.equal(retryEvent.hydration.retry.attempt, 1);
+  assert.equal(retryEvent.hydration.retry.scope, 'page-1');
+});
+
 test('historical hydration paginates full BTCUSDT UTC days without skipping or overrunning the range', async () => {
   const dayStartMs = Date.UTC(2026, 2, 10);
   const dayEndMs = dayStartMs + DAY_MS - 1;
@@ -312,6 +500,7 @@ test('historical hydration paginates full BTCUSDT UTC days without skipping or o
   const overrunTrades = Array.from({ length: 20 }, (_, index) => buildAggTrade(2501 + index, dayEndMs + 1 + index));
 
   const { service, storedTrades, coverageRecords } = createInMemoryHistoricalService({
+    bulkDataBaseUrl: null,
     fetchImpl: async (url) => {
       const parsed = new URL(url);
       requests.push(parsed.search);
@@ -469,6 +658,37 @@ test('multi-day backtests stream historical SQLite trades in bounded chunks inst
   assert.equal(result.sessionResults.length, 3);
   assert.ok(pageLoads.length >= 12, 'expected multiple chunk loads across days');
   assert.ok(Math.max(...pageLoads) <= 64, 'expected chunk loader to stay within the configured page size');
+});
+
+test('live mode behavior remains unchanged because hydration wiring stays backtest-only', () => {
+  const strategy = buildStrategy();
+  const runner = new LivePaperRunner({
+    getMarketSnapshot: () => ({
+      symbol: 'BTCUSDT',
+      bestBid: 100,
+      bestAsk: 101,
+      markPrice: 100.5,
+      analysis: {
+        candles: [],
+        closedCandles: []
+      }
+    }),
+    saveLiveState: () => {},
+    getLiveState: () => null,
+    strategyResolver: () => ({
+      strategy,
+      summary: { name: 'Live test strategy' }
+    })
+  });
+
+  const snapshot = runner.start({
+    strategyRef: { kind: 'built_in', key: 'test' },
+    runConfig: { orderSize: 0.01, enableLong: true, enableShort: false }
+  });
+
+  assert.equal(snapshot.status, 'running');
+  assert.equal(snapshot.mode, 'Paper Trading Only');
+  assert.equal(snapshot.strategyStatus, 'Monitoring live flow');
 });
 
 async function collectAsync(iterable) {

@@ -26,23 +26,70 @@ export class BacktestRunner {
     let processedCandles = 0;
     let emittedSinceProgress = 0;
     let emittedSinceYield = 0;
+    let lastHydrationState = null;
 
-    const emitProgress = ({ currentDate, currentDay, stage }) => {
+    const emitProgress = ({
+      currentDate,
+      currentDay,
+      stage,
+      phase = 'replay',
+      hydration = lastHydrationState,
+      replay = null,
+      progressPct = null
+    }) => {
       progressCallback?.({
         processed: processedCandles,
         total: totalCandlesTarget,
+        progressPct: Number.isFinite(Number(progressPct))
+          ? Number(progressPct)
+          : computeOverallProgressPct({
+              currentDay,
+              totalDays,
+              phase,
+              hydrationPercent: hydration?.percent,
+              replayPercent: replay?.percent
+            }),
         currentDate,
         currentDay,
         totalDays,
         totalTrades: runState.trades.length,
         elapsedMs: Date.now() - startedAtMs,
-        marker: stage
+        marker: stage,
+        phase,
+        hydration,
+        replay
       });
     };
 
     for (const { dayStartMs, dayEndMs, isoDate, dayIndex } of iterateUtcDays(startDate, endDate)) {
       shouldStop?.();
-      emitProgress({ currentDate: isoDate, currentDay: dayIndex + 1, stage: 'Loading session history' });
+      lastHydrationState = {
+        day: isoDate,
+        status: 'pending',
+        source: null,
+        rowsIngested: 0,
+        pagesIngested: 0,
+        checkpointTimeMs: null,
+        lastAggTradeId: null,
+        retry: null,
+        percent: 0
+      };
+      emitProgress({
+        currentDate: isoDate,
+        currentDay: dayIndex + 1,
+        stage: 'Loading session history',
+        phase: 'hydration',
+        hydration: lastHydrationState,
+        replay: {
+          day: isoDate,
+          status: 'pending',
+          replayedTrades: 0,
+          totalTrades: 0,
+          processedCandles,
+          totalCandlesTarget,
+          percent: totalCandlesTarget ? (processedCandles / totalCandlesTarget) * 100 : 0
+        }
+      });
 
       const dayPayload = this.historicalDataService
         ? await this.historicalDataService.loadDay({
@@ -50,11 +97,30 @@ export class BacktestRunner {
             dayStartMs,
             dayEndMs,
             shouldStop,
-            progressCallback: ({ stage }) => emitProgress({
-              currentDate: isoDate,
-              currentDay: dayIndex + 1,
-              stage
-            })
+            progressCallback: (payload = {}) => {
+              lastHydrationState = {
+                ...lastHydrationState,
+                ...(payload.hydration || {}),
+                day: isoDate
+              };
+              emitProgress({
+                currentDate: isoDate,
+                currentDay: dayIndex + 1,
+                stage: payload.stage,
+                phase: payload.phase || 'hydration',
+                hydration: lastHydrationState,
+                replay: {
+                  day: isoDate,
+                  status: 'pending',
+                  replayedTrades: 0,
+                  totalTrades: Number(payload.tradeCount || 0),
+                  processedCandles,
+                  totalCandlesTarget,
+                  percent: totalCandlesTarget ? (processedCandles / totalCandlesTarget) * 100 : 0
+                },
+                progressPct: payload.progressPct
+              });
+            }
           })
         : {
             trades: this.loadTrades({
@@ -72,6 +138,15 @@ export class BacktestRunner {
       const tradeSource = dayPayload.tradeStream || dayPayload.trades || [];
       const seedTrade = dayPayload.seedTrade || null;
       const totalDayTrades = Math.max(Number(dayPayload.tradeCount ?? (Array.isArray(tradeSource) ? tradeSource.length : 0)) || 0, 1);
+      lastHydrationState = {
+        ...lastHydrationState,
+        status: 'complete',
+        percent: 100,
+        source: dayPayload.hydrationSource || lastHydrationState?.source || null,
+        checkpointTimeMs: dayPayload.targetEndMs || lastHydrationState?.checkpointTimeMs || null,
+        lastAggTradeId: dayPayload.lastAggTradeId || lastHydrationState?.lastAggTradeId || null,
+        totalTrades: totalDayTrades
+      };
 
       const sessionReplay = new HistoricalMarketReplay({
         timeframe: strategy.market.timeframe,
@@ -101,7 +176,10 @@ export class BacktestRunner {
           emitProgress,
           currentDate: isoDate,
           currentDay: dayIndex + 1,
-          progressStage: `Replaying session ${Math.min(replayedTradeCount, totalDayTrades)}/${totalDayTrades} trades`
+          progressStage: `Replaying session ${Math.min(replayedTradeCount, totalDayTrades)}/${totalDayTrades} trades`,
+          totalDayTrades,
+          replayedTradeCount,
+          totalCandlesTarget
         }));
       }
 
@@ -115,7 +193,10 @@ export class BacktestRunner {
         emitProgress,
         currentDate: isoDate,
         currentDay: dayIndex + 1,
-        progressStage: 'Flushing end-of-day candles'
+        progressStage: 'Flushing end-of-day candles',
+        totalDayTrades,
+        replayedTradeCount,
+        totalCandlesTarget
       }));
 
       const flattenedTrade = this.executionEngine.finalizeDay({
@@ -139,7 +220,18 @@ export class BacktestRunner {
       emitProgress({
         currentDate: isoDate,
         currentDay: dayIndex + 1,
-        stage: flattenedTrade ? 'Session flattened at UTC close' : 'Session complete'
+        stage: flattenedTrade ? 'Session flattened at UTC close' : 'Session complete',
+        phase: 'replay',
+        hydration: lastHydrationState,
+        replay: {
+          day: isoDate,
+          status: 'complete',
+          replayedTrades: replayedTradeCount,
+          totalTrades: totalDayTrades,
+          processedCandles,
+          totalCandlesTarget,
+          percent: totalCandlesTarget ? (processedCandles / totalCandlesTarget) * 100 : 100
+        }
       });
 
       await yieldToEventLoop();
@@ -168,7 +260,10 @@ export class BacktestRunner {
     emitProgress,
     currentDate,
     currentDay,
-    progressStage
+    progressStage,
+    totalDayTrades,
+    replayedTradeCount,
+    totalCandlesTarget
   }) {
     const fillModel = this.executionEngine.createFillModel({
       syntheticSpreadBps: runState.settings.syntheticSpreadBps
@@ -188,7 +283,21 @@ export class BacktestRunner {
       emittedSinceYield += 1;
 
       if (emittedSinceProgress >= PROGRESS_EMIT_EVERY_CANDLES) {
-        emitProgress({ currentDate, currentDay, stage: progressStage });
+        emitProgress({
+          currentDate,
+          currentDay,
+          stage: progressStage,
+          phase: 'replay',
+          replay: {
+            day: currentDate,
+            status: 'running',
+            replayedTrades: replayedTradeCount,
+            totalTrades: totalDayTrades,
+            processedCandles,
+            totalCandlesTarget,
+            percent: totalCandlesTarget ? (processedCandles / totalCandlesTarget) * 100 : 0
+          }
+        });
         emittedSinceProgress = 0;
       }
 
@@ -200,6 +309,29 @@ export class BacktestRunner {
 
     return { processedCandles, emittedSinceProgress, emittedSinceYield };
   }
+}
+
+function computeOverallProgressPct({ currentDay, totalDays, phase, hydrationPercent, replayPercent }) {
+  const safeCurrentDay = Math.max(Number(currentDay) || 1, 1);
+  const safeTotalDays = Math.max(Number(totalDays) || 1, 1);
+  const completedDays = Math.min(safeCurrentDay - 1, safeTotalDays);
+  const hydrationRatio = clampRatio((Number(hydrationPercent) || 0) / 100);
+  const replayRatio = clampRatio((Number(replayPercent) || 0) / 100);
+
+  let dayRatio = replayRatio;
+  if (phase === 'hydration') {
+    dayRatio = hydrationRatio * 0.4;
+  } else if (phase === 'replay') {
+    dayRatio = 0.4 + (replayRatio * 0.6);
+  } else if (phase === 'completed') {
+    dayRatio = 1;
+  }
+
+  return ((completedDays + clampRatio(dayRatio)) / safeTotalDays) * 100;
+}
+
+function clampRatio(value) {
+  return Math.max(0, Math.min(1, Number(value) || 0));
 }
 
 function buildSessionResult({ isoDate, candleCount, trades, sourceTradeCount, flattenedTrade }) {

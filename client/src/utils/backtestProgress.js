@@ -4,6 +4,7 @@ export function deriveBacktestProgress(job) {
   const totalDays = Number(latest?.total_days || 0);
   const errorMessage = latest?.error_message || '';
   const fallbackMarker = latest?.current_marker || 'Waiting to start';
+  const progressDetails = parseProgressJson(latest?.progress_json);
 
   return {
     status: humanizeStatus(latest?.status || 'ready'),
@@ -13,7 +14,10 @@ export function deriveBacktestProgress(job) {
     elapsedMs: latest?.elapsed_ms || 0,
     totalTrades: latest?.closed_trade_count || parseTradeCount(latest?.current_marker),
     marker: latest?.status === 'failed' && errorMessage ? 'Failed' : fallbackMarker,
-    errorMessage
+    errorMessage,
+    phase: progressDetails?.phase || null,
+    hydration: progressDetails?.hydration || null,
+    replay: progressDetails?.replay || null
   };
 }
 
@@ -35,4 +39,13 @@ function parseCurrentDate(marker) {
 
 function parseTradeCount(marker) {
   return Number(marker?.match(/(\d+) trades/)?.[1] || 0);
+}
+
+function parseProgressJson(value) {
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
 }

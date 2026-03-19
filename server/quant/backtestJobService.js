@@ -47,6 +47,11 @@ export class BacktestJobService {
         status: 'running',
         progress_pct: 1,
         current_marker: 'Preparing replay engine',
+        progress_json: JSON.stringify({
+          phase: 'preparing',
+          hydration: null,
+          replay: null
+        }),
         current_date: runConfig?.startDate || null,
         current_day: 1,
         total_days: computeDayCount(runConfig?.startDate, runConfig?.endDate),
@@ -64,14 +69,21 @@ export class BacktestJobService {
           const dbJob = this.getJobById(jobId);
           if (!dbJob || dbJob.status === 'cancelled') throw new Error('cancelled');
         },
-        progressCallback: ({ processed, total, marker, currentDate, currentDay, totalDays, totalTrades, elapsedMs }) => {
+        progressCallback: ({ processed, total, progressPct, marker, currentDate, currentDay, totalDays, totalTrades, elapsedMs, phase, hydration, replay }) => {
           const dbJob = this.getJobById(jobId);
           if (!dbJob || dbJob.status === 'cancelled') throw new Error('cancelled');
           this.updateJob(jobId, {
             status: 'running',
-            progress_pct: Math.min(Math.floor((processed / Math.max(total, 1)) * 100), 99),
+            progress_pct: Number.isFinite(Number(progressPct))
+              ? Math.max(0, Math.min(Math.floor(Number(progressPct)), 99))
+              : Math.min(Math.floor((processed / Math.max(total, 1)) * 100), 99),
             processed_items: processed,
             current_marker: marker,
+            progress_json: JSON.stringify({
+              phase: phase || null,
+              hydration: hydration || null,
+              replay: replay || null
+            }),
             current_date: currentDate,
             current_day: currentDay,
             total_days: totalDays,
@@ -101,6 +113,11 @@ export class BacktestJobService {
       this.completeJob(jobId, {
         progress_pct: 100,
         current_marker: 'Completed',
+        progress_json: JSON.stringify({
+          phase: 'completed',
+          hydration: null,
+          replay: null
+        }),
         result_id: result.id,
         elapsed_ms: Date.now() - startedAt,
         closed_trade_count: resultPayload.trades.length
@@ -111,7 +128,12 @@ export class BacktestJobService {
       try {
         this.failJob(jobId, error, {
           elapsed_ms: Date.now() - startedAt,
-          current_marker: 'Failed'
+          current_marker: 'Failed',
+          progress_json: JSON.stringify({
+            phase: 'failed',
+            hydration: null,
+            replay: null
+          })
         });
       } catch (failError) {
         console.error('[backtest] unable to persist failed job state', {
@@ -124,7 +146,15 @@ export class BacktestJobService {
   }
 
   cancel(jobId) {
-    this.updateJob(jobId, { status: 'cancelled', current_marker: 'Cancelled by operator' });
+    this.updateJob(jobId, {
+      status: 'cancelled',
+      current_marker: 'Cancelled by operator',
+      progress_json: JSON.stringify({
+        phase: 'cancelled',
+        hydration: null,
+        replay: null
+      })
+    });
   }
 
   getProgress(jobId) {
