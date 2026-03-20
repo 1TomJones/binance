@@ -122,6 +122,7 @@ export class StrategyExecutionEngine {
 
   finalizeDay({ strategy, state, fillModel, dateLabel }) {
     if (!state.position) {
+      this.compactEquitySeriesForDate({ state, dateLabel });
       state.session = this.createSessionState();
       state.session.sessionDate = dateLabel;
       return null;
@@ -147,6 +148,7 @@ export class StrategyExecutionEngine {
     state.tradeLog.unshift(buildTradeLogRow(closed, 'EXIT'));
     state.position = null;
     this.#pushEquityPoint(state, finalCandle.time, dateLabel);
+    this.compactEquitySeriesForDate({ state, dateLabel });
     state.session = this.createSessionState();
     state.session.sessionDate = dateLabel;
     return closed;
@@ -186,6 +188,35 @@ export class StrategyExecutionEngine {
         return side === 'long' ? quote.bid : quote.ask;
       }
     };
+  }
+
+  compactEquitySeriesForDate({ state, dateLabel }) {
+    const startIndex = state.equitySeries.findIndex((point) => point.date === dateLabel);
+    if (startIndex === -1) return;
+
+    let endIndex = startIndex;
+    while (endIndex + 1 < state.equitySeries.length && state.equitySeries[endIndex + 1].date === dateLabel) {
+      endIndex += 1;
+    }
+
+    const datePoints = state.equitySeries.slice(startIndex, endIndex + 1);
+    if (datePoints.length <= 2) return;
+
+    const compactedDay = [datePoints[0]];
+    for (let index = 1; index < datePoints.length - 1; index += 1) {
+      const point = datePoints[index];
+      const previous = datePoints[index - 1];
+      if (point.equity !== previous.equity) {
+        compactedDay.push(point);
+      }
+    }
+    compactedDay.push(datePoints.at(-1));
+
+    state.equitySeries = [
+      ...state.equitySeries.slice(0, startIndex),
+      ...compactedDay,
+      ...state.equitySeries.slice(endIndex + 1)
+    ];
   }
 
   #pushEquityPoint(state, candleTime, currentDateLabel) {
